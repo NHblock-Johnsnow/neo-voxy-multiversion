@@ -162,8 +162,7 @@ public final class CopycatDistantRenderer implements LodPipelineHooks.Renderer, 
         if (translucent) pipeline.setupAndBindTranslucent(viewport);
         else pipeline.setupAndBindOpaque(viewport);
 
-        double vanillaReach = Math.max(0.0, mc.options.getEffectiveRenderDistance() * 16.0 - 14.0);
-        double handoffSq = vanillaReach * vanillaReach;
+        double handoffSq = me.cortex.voxy.client.compat.SectionHandoff.distanceSquared();
         double maxDistance = VoxyConfig.CONFIG.createRenderDistance(VoxyConfig.CONFIG.distantCopycatsMaxChunks);
         double maxDistanceSq = maxDistance * maxDistance;
         boolean bound = false;
@@ -181,8 +180,11 @@ public final class CopycatDistantRenderer implements LodPipelineHooks.Renderer, 
                 double dx = ox + 8.0 - viewport.cameraX;
                 double dy = oy + 8.0 - viewport.cameraY;
                 double dz = oz + 8.0 - viewport.cameraZ;
-                double nearSq = dx * dx + dz * dz;
-                if (nearSq < handoffSq || dx * dx + dy * dy + dz * dz > maxDistanceSq) continue;
+                double farX = Math.abs(dx) + 12.0, farZ = Math.abs(dz) + 12.0;
+                double nearSq = farX * farX + farZ * farZ;
+                if (dx * dx + dy * dy + dz * dz > maxDistanceSq) continue;
+                if (nearSq < handoffSq && me.cortex.voxy.client.compat.SectionHandoff.vanillaOwns(
+                        BlockPos.getX(key), BlockPos.getY(key), BlockPos.getZ(key))) continue;
                 if (!DistantVisibility.isBoxVisible(viewport, ox - 4, oy - 4, oz - 4,
                         ox + 20, oy + 20, oz + 20)) continue;
                 if (!bound) {

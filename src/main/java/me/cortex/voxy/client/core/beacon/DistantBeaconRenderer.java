@@ -71,13 +71,16 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
     private final List<Built> built = new ArrayList<>();
     private boolean builtStale;
     private long lastFilterMs = -1;
+    private double lastFilterX, lastFilterZ;
+    private double lastFilterRange = -1;
+    private long nextRetryMs = Long.MAX_VALUE;
     private me.cortex.voxy.common.world.WorldEngine boundEngine;
     private final it.unimi.dsi.fastutil.longs.LongArrayList drainDirty = new it.unimi.dsi.fastutil.longs.LongArrayList();
     private final it.unimi.dsi.fastutil.longs.LongArrayList drainRemoved = new it.unimi.dsi.fastutil.longs.LongArrayList();
 
     //topY is kept so the draw can frustum-test the beam: it is a tall thin column, and testing only its
     //base rejects it whenever the base is below the view while the visible part is not.
-    private record Built(DistantMesh mesh, double x, double y, double z, double topY) {}
+    private record Built(DistantMesh mesh, double x, double y, double z, double topY, BlockPos pos) {}
 
     public DistantBeaconRenderer() {
         active = this;
@@ -111,8 +114,8 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
             this.lastFilterMs = -1;
         }
 
-        this.processChanges(engine, viewport, mc);
         this.filterIfStale(viewport);
+        this.processChanges(engine, viewport, mc);
         if (this.builtStale) {
             this.builtStale = false;
             this.built.clear();
@@ -121,7 +124,8 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
                 if (state.mesh != null) {
                     long pos = entry.getLongKey();
                     this.built.add(new Built(state.mesh,
-                            BlockPos.getX(pos) + 0.5, BlockPos.getY(pos), BlockPos.getZ(pos) + 0.5, state.topY));
+                            BlockPos.getX(pos) + 0.5, BlockPos.getY(pos), BlockPos.getZ(pos) + 0.5,
+                            state.topY, BlockPos.of(pos)));
                 }
             }
             lastBuiltCount = this.built.size();
@@ -132,7 +136,8 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
         }
 
         pipeline.setupAndBindOpaque(viewport);
-        LodPipelineHooks.renderStateGuarded(() -> this.draw(pipeline, viewport, depthFunc));
+        // 外层联动调度已保存 GL 状态，无需为光柱再读取一遍驱动状态。
+        this.draw(pipeline, viewport, depthFunc);
     }
 
     private void draw(AbstractRenderPipeline pipeline, Viewport<?> viewport, int depthFunc) {
@@ -159,13 +164,16 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
             int drawn = 0;
             double vanillaRange = Math.min(VANILLA_BEAM_RANGE,
                     Minecraft.getInstance().options.getEffectiveRenderDistance() * 16.0);
-            double vanillaRangeSq = vanillaRange * vanillaRange;
+            double readyRange = Math.max(16.0, vanillaRange - HANDOFF_OVERLAP);
+            double readyRangeSq = readyRange * readyRange;
+            double maxRange = VoxyConfig.CONFIG.createRenderDistance(VoxyConfig.CONFIG.distantBeaconMaxChunks);
             lastVanillaRange = (int) vanillaRange;
             int vanillaOwned = 0;
             for (var beam : this.built) {
                 double bdx = beam.x - viewport.cameraX, bdz = beam.z - viewport.cameraZ;
                 double horizontalSq = bdx * bdx + bdz * bdz;
-                if (vanillaBeamReady(mc, beam, horizontalSq, vanillaRangeSq)) {
+                if (horizontalSq > maxRange * maxRange) continue;
+                if (vanillaBeamReady(mc, beam, horizontalSq, readyRangeSq)) {
                     vanillaOwned++;
                     continue;
                 }
@@ -211,7 +219,7 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
             return;
         }
 
-        double maxDist = VoxyConfig.CONFIG.createRenderDistance(VoxyConfig.CONFIG.distantBeaconMaxChunks);
+        double maxDist = VoxyConfig.CONFIG.createRenderDistance(VoxyConfig.CONFIG.distantBeaconMaxChunks) + 128.0;
         double maxDistSq = maxDist * maxDist;
         long now = System.currentTimeMillis();
         int solved = 0;
@@ -261,25 +269,28 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
         }
         if (result.cacheMissed()) {
             state.retryAtMs = now + WARM_RETRY_MS;
+            this.nextRetryMs = Math.min(this.nextRetryMs, state.retryAtMs);
             return;
-        }
-        if (state.mesh != null) {
-            state.mesh.free();
-            state.mesh = null;
-            this.builtStale = true;
         }
         if (result.lookupFailed()) {
             //Solved against a mapper that had not registered an id yet - a wrong verdict cached now
             //would stick until the next voxel change, so hold it provisional and retry
             state.retryAtMs = now + LOOKUP_RETRY_MS;
+            this.nextRetryMs = Math.min(this.nextRetryMs, state.retryAtMs);
             return;
         }
         state.retryAtMs = 0;
         if (result.segments().isEmpty()) {
+            if (state.mesh != null) {
+                state.mesh.free();
+                state.mesh = null;
+                this.builtStale = true;
+            }
             return;
         }
         var mesh = bake(result.segments(), by);
         if (mesh != null) {
+            if (state.mesh != null) state.mesh.free();
             double topY = by;
             for (var seg : result.segments()) {
                 topY = Math.max(topY, seg.yTop());
@@ -291,13 +302,13 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
     }
 
     private static boolean vanillaBeamReady(Minecraft mc, Built beam,
-                                             double horizontalSq, double vanillaRangeSq) {
-        double vanillaRange = Math.sqrt(vanillaRangeSq);
-        double readyRange = Math.max(16.0, vanillaRange - HANDOFF_OVERLAP);
-        if (horizontalSq >= readyRange * readyRange || mc.level == null) {
+                                             double horizontalSq, double readyRangeSq) {
+        if (horizontalSq >= readyRangeSq || mc.level == null) {
             return false;
         }
-        BlockPos pos = BlockPos.containing(beam.x, beam.y, beam.z);
+        BlockPos pos = beam.pos;
+        // 光柱是跨区段的方块实体渲染，底座不可见时仍可能显示，不能套用地形可见集合。
+        if (!mc.levelRenderer.isSectionCompiled(pos)) return false;
         if (!mc.level.getChunkSource().hasChunk(pos.getX() >> 4, pos.getZ() >> 4)) {
             return false;
         }
@@ -378,13 +389,23 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
     //the LOD range as the camera moves. One distance check per index entry, no acquires, no GL.
     private void filterIfStale(Viewport<?> viewport) {
         long now = System.currentTimeMillis();
-        if (this.lastFilterMs != -1 && now - this.lastFilterMs < 2000) {
+        double maxDist = VoxyConfig.CONFIG.createRenderDistance(VoxyConfig.CONFIG.distantBeaconMaxChunks);
+        double movedX = viewport.cameraX - this.lastFilterX;
+        double movedZ = viewport.cameraZ - this.lastFilterZ;
+        long elapsed = now - this.lastFilterMs;
+        if (this.lastFilterMs != -1 && maxDist == this.lastFilterRange && elapsed < 2000
+                && now < this.nextRetryMs
+                && (elapsed < 100 || movedX * movedX + movedZ * movedZ < 32.0 * 32.0)) {
             return;
         }
         this.lastFilterMs = now;
-
-        double maxDist = VoxyConfig.CONFIG.createRenderDistance(VoxyConfig.CONFIG.distantBeaconMaxChunks);
-        double maxDistSq = maxDist * maxDist;
+        this.lastFilterX = viewport.cameraX;
+        this.lastFilterZ = viewport.cameraZ;
+        this.lastFilterRange = maxDist;
+        this.nextRetryMs = Long.MAX_VALUE;
+        // 提前准备、延后回收，避免跨越范围边界时反复烘焙。
+        double prepareSq = (maxDist + 64.0) * (maxDist + 64.0);
+        double retainSq = (maxDist + 128.0) * (maxDist + 128.0);
         int[] outOfRange = new int[1];
         var engine = this.boundEngine;
         if (engine == null) {
@@ -394,9 +415,9 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
             long pos = BlockPos.asLong(bx, by, bz);
             double dx = (bx + 0.5) - viewport.cameraX;
             double dz = (bz + 0.5) - viewport.cameraZ;
-            boolean inRange = dx * dx + dz * dz <= maxDistSq;
             BeaconState state = this.states.get(pos);
-            if (!inRange) {
+            double distanceSq = dx * dx + dz * dz;
+            if (distanceSq > retainSq) {
                 outOfRange[0]++;
                 if (state != null) {
                     this.states.remove(pos);
@@ -409,10 +430,12 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
             }
             if (state == null) {
                 //Came into range without a voxel change - first sight, or returning after eviction
-                BeaconBeamTracker.queueDirty(pos);
+                if (distanceSq <= prepareSq) BeaconBeamTracker.queueDirty(pos);
             } else if (state.retryAtMs != 0 && now >= state.retryAtMs) {
                 state.retryAtMs = 0;
                 BeaconBeamTracker.queueDirty(pos);
+            } else if (state.retryAtMs != 0) {
+                this.nextRetryMs = Math.min(this.nextRetryMs, state.retryAtMs);
             }
         });
         lastOutOfRange = outOfRange[0];
@@ -455,6 +478,7 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
         this.states.clear();
         this.built.clear();
         this.builtStale = false;
+        this.nextRetryMs = Long.MAX_VALUE;
     }
 
     @net.neoforged.bus.api.SubscribeEvent

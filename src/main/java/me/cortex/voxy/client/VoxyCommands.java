@@ -460,9 +460,6 @@ public class VoxyCommands {
         var instance = (VoxyClientInstance)VoxyCommon.getInstance();
         if (instance == null) return false;
         var wr = Minecraft.getInstance().levelRenderer;
-        if (net.neoforged.fml.ModList.get().isLoaded("littletiles")) {
-            me.cortex.voxy.client.compat.littletiles.LittleTilesDistantRenderer.checkpointActive();
-        }
         if (wr!=null) {
             ((IGetVoxyRenderSystem)wr).voxy$shutdownRenderer();
         }

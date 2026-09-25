@@ -84,6 +84,9 @@ public class VoxyClientInstance extends VoxyInstance {
 
     @Override
     public void shutdown() {
+        if (net.neoforged.fml.ModList.get().isLoaded("littletiles")) {
+            me.cortex.voxy.client.compat.littletiles.LittleTilesDistantRenderer.checkpointActive();
+        }
         super.shutdown();
         // 实例销毁后再释放共享 GPU 缓存，避免仍在使用的渲染器拿到失效资源。
         RenderResourceReuse.clearResources();

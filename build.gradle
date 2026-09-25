@@ -368,6 +368,30 @@ tasks.named('check') {
     dependsOn tasks.named('verifyWorldSectionPositions')
 }
 
+tasks.register('verifyLiveHandoff', JavaExec) {
+    group = 'verification'
+    description = 'Verifies frame-consistent distant-render handoff and reacquisition'
+    dependsOn tasks.named('verificationClasses')
+    classpath = sourceSets.verification.runtimeClasspath
+    mainClass = 'me.cortex.voxy.client.compat.LiveHandoffVerification'
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('verifyLiveHandoff')
+}
+
+tasks.register('verifyRocksDBLifecycle', JavaExec) {
+    group = 'verification'
+    description = 'Verifies auxiliary-table access across RocksDB close and reopen'
+    dependsOn tasks.named('verificationClasses')
+    classpath = sourceSets.verification.runtimeClasspath
+    mainClass = 'me.cortex.voxy.common.config.storage.RocksDBLifecycleVerification'
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('verifyRocksDBLifecycle')
+}
+
 jar {
     // The full nested-dependency archive is only an input to slimJar. Keep it out of build/libs so
     // users and CI cannot accidentally publish the ~90 MiB intermediate.

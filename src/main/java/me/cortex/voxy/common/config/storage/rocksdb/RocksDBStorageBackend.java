@@ -35,6 +35,11 @@ public class RocksDBStorageBackend extends StorageBackend {
 
     //NOTE: closes in order
     private final List<AbstractImmutableNativeReference> closeList = new ArrayList<>();
+    private volatile boolean closed;
+
+    private void requireOpen() {
+        if (this.closed) throw new IllegalStateException("RocksDB storage is closed");
+    }
 
     public RocksDBStorageBackend(String path) {
         RocksDB.loadLibrary();
@@ -145,11 +150,12 @@ public class RocksDBStorageBackend extends StorageBackend {
 
     @Override
     public boolean supportsAuxTable(String table) {
-        return true;
+        return !this.closed;
     }
 
     @Override
-    public void putAux(String table, long key, byte[] value) {
+    public synchronized void putAux(String table, long key, byte[] value) {
+        this.requireOpen();
         long t = me.cortex.voxy.commonImpl.VoxyProfile.begin();
         try {
             //Aux entries are derived data and regenerate on re-ingest like sections do, but they are far
@@ -163,7 +169,8 @@ public class RocksDBStorageBackend extends StorageBackend {
     }
 
     @Override
-    public byte[] getAux(String table, long key) {
+    public synchronized byte[] getAux(String table, long key) {
+        this.requireOpen();
         var handle = this.auxHandle(table, false);
         if (handle == null) {
             return null;
@@ -176,7 +183,8 @@ public class RocksDBStorageBackend extends StorageBackend {
     }
 
     @Override
-    public void deleteAux(String table, long key) {
+    public synchronized void deleteAux(String table, long key) {
+        this.requireOpen();
         var handle = this.auxHandle(table, false);
         if (handle == null) {
             return;
@@ -189,7 +197,8 @@ public class RocksDBStorageBackend extends StorageBackend {
     }
 
     @Override
-    public void forEachAux(String table, AuxEntryConsumer consumer) {
+    public synchronized void forEachAux(String table, AuxEntryConsumer consumer) {
+        this.requireOpen();
         var handle = this.auxHandle(table, false);
         if (handle == null) {
             return;
@@ -385,7 +394,8 @@ public class RocksDBStorageBackend extends StorageBackend {
     }
 
     @Override
-    public void flush() {
+    public synchronized void flush() {
+        this.requireOpen();
         try {
             this.db.flushWal(true);
             try (var flushOpts = new FlushOptions().setWaitForFlush(true)) {
@@ -397,8 +407,11 @@ public class RocksDBStorageBackend extends StorageBackend {
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
+        if (this.closed) return;
         this.flush();
+        // 辅助表访问与关闭共用锁，不能把失效的 native handle 传入 JNI。
+        this.closed = true;
         this.closeList.forEach(AbstractImmutableNativeReference::close);
         try {
             this.db.closeE();

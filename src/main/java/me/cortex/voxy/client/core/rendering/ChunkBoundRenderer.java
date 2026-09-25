@@ -53,6 +53,22 @@ public class ChunkBoundRenderer {
     private int[] visibleSections = new int[INIT_MAX_SECTION_COUNT*2];
     private int count;
     private boolean changed;
+    private int handoffGeneration = -1;
+    private final it.unimi.dsi.fastutil.longs.LongOpenHashSet handoffSections =
+            new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+
+    /** 按需复用 Sodium 的绘制集合，不把已加载但尚未绘制的区段交给原版。 */
+    public boolean containsVisibleSection(long pos) {
+        if (this.handoffGeneration != this.contentGeneration) {
+            this.handoffSections.clear();
+            for (int i = 0; i < this.uploadedCount; i += 2) {
+                this.handoffSections.add(Integer.toUnsignedLong(this.uploadedSections[i])
+                        | ((long) this.uploadedSections[i + 1] << 32));
+            }
+            this.handoffGeneration = this.contentGeneration;
+        }
+        return this.handoffSections.contains(pos);
+    }
 
     //Half-res mask: box dilation in mask pixels (a half-res texel's sample point sits up to half a
     //viewport pixel from the pixels it covers) and the slope-scaled depth offset, also in mask

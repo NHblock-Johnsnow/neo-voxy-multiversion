@@ -35,9 +35,8 @@ public final class DistantTrainManager {
         //Voxel-store light sample at the carriage position, refreshed periodically while it moves
         public int lightPacked = -1;
         public long lightSampledAtMs;
-        public boolean liveOwnershipKnown;
-        public boolean liveOwns;
-        public long liveEligibleSinceNanos;
+        public final me.cortex.voxy.client.compat.LiveHandoffState handoff =
+                new me.cortex.voxy.client.compat.LiveHandoffState();
     }
 
     public static final class TrainState {

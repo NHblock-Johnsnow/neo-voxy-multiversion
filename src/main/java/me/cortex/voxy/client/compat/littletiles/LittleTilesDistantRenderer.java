@@ -82,6 +82,7 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
         return thread;
     });
     private SectionStorage storage;
+    private me.cortex.voxy.common.world.WorldEngine boundEngine;
     private ClientLevel level;
     private boolean storageLoaded;
     private int lastBucketX = Integer.MIN_VALUE, lastBucketZ = Integer.MIN_VALUE;
@@ -98,7 +99,11 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
 
     public static void accept(SectionStorage storage, LittleTilesCompat.SectionSnapshot snapshot) {
         LittleTilesDistantRenderer renderer = active;
-        if (renderer != null) renderer.updates.add(new Update(storage, snapshot, true));
+        if (renderer != null) {
+            synchronized (renderer.updates) {
+                renderer.updates.add(new Update(storage, snapshot, true));
+            }
+        }
     }
 
     public static void checkpointActive() {
@@ -116,22 +121,12 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
             return;
         }
         var engine = WorldIdentifier.ofEngineNullable(mc.level);
-        if (engine == null) return;
+        if (engine == null || !engine.isLive()) {
+            discardCompletedBakes();
+            return;
+        }
         if (this.storage != engine.storage) {
-            boolean sameLevel = this.level == mc.level;
-            if (sameLevel) drainUpdates(Integer.MAX_VALUE, null, 0.0);
-            var carried = sameLevel
-                    ? this.sections.values().stream().map(entry -> entry.snapshot).toList()
-                    : java.util.List.<LittleTilesCompat.SectionSnapshot>of();
-            clearMeshes();
-            this.updates.clear();
-            this.level = mc.level;
-            this.storage = engine.storage;
-            this.storageLoaded = true;
-            for (var snapshot : LittleTilesStore.loadAll(this.storage)) {
-                this.updates.add(new Update(this.storage, snapshot, false));
-            }
-            for (var snapshot : carried) this.updates.add(new Update(this.storage, snapshot, true));
+            bindStorage(engine, mc.level);
         }
         if (!this.storageLoaded) {
             this.storageLoaded = true;
@@ -152,11 +147,44 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
         scheduleBakes(camera.x, camera.y, camera.z, maxDistance * maxDistance);
     }
 
+    private void bindStorage(me.cortex.voxy.common.world.WorldEngine engine, ClientLevel level) {
+        synchronized (this.updates) {
+            boolean sameLevel = this.level == level;
+            var carried = new HashMap<Long, LittleTilesCompat.SectionSnapshot>();
+            if (sameLevel) {
+                for (var entry : this.sections.entrySet()) {
+                    carried.put(entry.getKey(), entry.getValue().snapshot);
+                }
+            }
+            var incoming = new ArrayList<Update>();
+            // 旧存储可能已关闭；只迁移内存快照，空快照也要保留以免删除的模型复活。
+            Update update;
+            while ((update = this.updates.poll()) != null) {
+                if (update.storage == engine.storage) incoming.add(update);
+                else if (sameLevel && update.storage == this.storage) {
+                    var snapshot = update.snapshot;
+                    carried.put(LittleTilesStore.key(snapshot.sx(), snapshot.sy(), snapshot.sz()), snapshot);
+                }
+            }
+            clearMeshes();
+            this.level = level;
+            this.storage = engine.storage;
+            this.boundEngine = engine;
+            this.storageLoaded = true;
+            for (var snapshot : LittleTilesStore.loadAll(this.storage)) {
+                this.updates.add(new Update(this.storage, snapshot, false));
+            }
+            for (var snapshot : carried.values()) this.updates.add(new Update(this.storage, snapshot, true));
+            this.updates.addAll(incoming);
+        }
+    }
+
     @SubscribeEvent
     public void logout(ClientPlayerNetworkEvent.LoggingOut event) {
         checkpoint();
         clearMeshes();
         this.storage = null;
+        this.boundEngine = null;
         this.level = null;
         this.storageLoaded = false;
         this.updates.clear();
@@ -184,8 +212,7 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
         if (translucent) pipeline.setupAndBindTranslucent(viewport);
         else pipeline.setupAndBindOpaque(viewport);
 
-        double vanillaReach = Math.max(0.0, mc.options.getEffectiveRenderDistance() * 16.0 - 14.0);
-        double handoffDistanceSq = vanillaReach * vanillaReach;
+        double handoffDistanceSq = me.cortex.voxy.client.compat.SectionHandoff.distanceSquared();
         double maxDistance = VoxyConfig.CONFIG.createRenderDistance(VoxyConfig.CONFIG.distantLittleTilesMaxChunks);
         double maxDistanceSq = maxDistance * maxDistance;
         boolean bound = false;
@@ -199,8 +226,10 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
                 double dx = ox + 8.0 - viewport.cameraX;
                 double dy = oy + 8.0 - viewport.cameraY;
                 double dz = oz + 8.0 - viewport.cameraZ;
-                double handoffSq = dx * dx + dz * dz;
-                if (handoffSq < handoffDistanceSq) continue;
+                double farX = Math.abs(dx) + 8.0, farZ = Math.abs(dz) + 8.0;
+                double handoffSq = farX * farX + farZ * farZ;
+                if (handoffSq < handoffDistanceSq && me.cortex.voxy.client.compat.SectionHandoff.vanillaOwns(
+                        source.sx(), source.sy(), source.sz())) continue;
                 if (dx * dx + dy * dy + dz * dz > maxDistanceSq) continue;
                 if (!DistantVisibility.isBoxVisible(viewport, ox, oy, oz, ox + 16, oy + 16, oz + 16)) continue;
                 if (!bound) {
@@ -483,7 +512,7 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
     }
 
     private void checkpoint() {
-        if (this.storage == null) return;
+        if (this.storage == null || this.boundEngine == null || !this.boundEngine.isLive()) return;
         drainUpdates(Integer.MAX_VALUE, null, 0.0);
         for (var entry : this.sections.values()) {
             LittleTilesStore.save(this.storage, entry.snapshot);

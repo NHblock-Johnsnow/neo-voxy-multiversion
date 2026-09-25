@@ -17,11 +17,13 @@ Neo Voxy 由 **JohnSnow** 维护，基于 [NHblock714/voxy](https://github.com/N
 
 | 版本 | 安装位置 | 渲染前置 | Java | 发布文件 |
 |---|---|---|---:|---|
-| Minecraft 1.21.1 · NeoForge | 客户端必装，服务端可选 | Sodium 0.8.x / Iris 1.8.12+ | 21 | `neo-voxy-0.5.0-alpha.4-mc1.21.1-neoforge.jar` |
+| Minecraft 1.21.1 · NeoForge | 客户端必装，服务端可选 | Sodium 0.8.x / Iris 1.8.12+ | 21 | `neo-voxy-0.5.0-alpha.6-mc1.21.1-neoforge.jar` |
 | Minecraft 1.20.1 · Forge | 仅客户端 | Embeddium / Oculus | 17 | `neo-voxy-0.3.5-alpha.2-mc1.20.1-forge-client.jar` |
 | Minecraft 26.1.2 · NeoForge | 仅客户端 | Sodium 0.9.2 / Iris 1.11.4+ | 25 | `neo-voxy-0.3.4-mc26.1.2-neoforge-client.jar` |
 
 ## 安装与服务器兼容（1.21.1）
+
+1.21.1 的远景交接会等待实际绘制的原版区段，并避开地形渐隐带；Domum 网格更新期间保留旧模型，信标随移动提前准备，列车每帧共用交接结果并延迟重新接管。预加载会略增边界附近的缓存占用，重建仍受预算限制；传送到没有缓存的区域仍需等待数据和模型就绪。
 
 1.21.1 从 0.5.0 起只发布一个 JAR，不再区分联动版与纯客户端版。客户端必须安装才能使用远景；服务端可选安装同一个 JAR，服务端不需要 Sodium 或 Iris。不要同时安装旧的两个版本。
 
