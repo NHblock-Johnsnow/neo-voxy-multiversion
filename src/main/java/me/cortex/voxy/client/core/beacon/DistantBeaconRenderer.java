@@ -190,7 +190,7 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
                         (float) (beam.z - viewport.cameraZ))
                         .scale(radius / CORE_RADIUS, 1.0f, radius / CORE_RADIUS);
                 DistantShaders.uploadTransform(transform);
-                beam.mesh.draw();
+                beam.mesh.drawTranslucent(viewport, transform);
                 drawn++;
             }
             lastFrameBeamsDrawn = drawn;
@@ -443,7 +443,7 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
 
     //Four sides of a square column per segment, textured along Y the way vanilla's beam is
     private static DistantMesh bake(List<BeaconBeamSolver.Segment> segments, int beaconY) {
-        var builder = new DistantMeshBuilder();
+        var builder = new DistantMeshBuilder(false);
         for (var segment : segments) {
             float y0 = segment.yBottom() - beaconY;
             float y1 = segment.yTop() - beaconY;

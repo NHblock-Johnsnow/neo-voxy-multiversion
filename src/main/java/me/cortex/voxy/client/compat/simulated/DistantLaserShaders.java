@@ -28,7 +28,8 @@ final class DistantLaserShaders {
                     if (fragment == null) fragment = pipeline.patchOpaqueShader(null, source);
                     if (fragment != null) {
                         patched = Shader.make().define("PATCHED_SHADER").define("TRANSLUCENT")
-                                .add(ShaderType.VERTEX, "voxy:compat/distant.vert")
+                                .addSource(ShaderType.VERTEX,
+                                        me.cortex.voxy.client.compat.create.DistantShaders.patchedVertex(pipeline))
                                 .addSource(ShaderType.FRAGMENT, fragment)
                                 .compile().name("distant_laser_patched");
                     }

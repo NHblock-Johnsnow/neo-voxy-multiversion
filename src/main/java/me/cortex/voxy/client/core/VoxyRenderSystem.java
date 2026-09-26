@@ -629,6 +629,10 @@ public class VoxyRenderSystem {
     }
 
     public void addDebugInfo(List<String> debug) {
+        debug.add("Distant mesh triangles: " + me.cortex.voxy.client.compat.create.DistantMesh.submittedTriangles
+                + "/" + me.cortex.voxy.client.compat.create.DistantMesh.fullDetailTriangles);
+        debug.add("Distant mesh draws coarse/full: " + me.cortex.voxy.client.compat.create.DistantMesh.coarseDraws
+                + "/" + me.cortex.voxy.client.compat.create.DistantMesh.detailedDraws);
         debug.add("Buf/Tex [#/Mb]: [" + GlBuffer.getCount() + "/" + (GlBuffer.getTotalSize()/1_000_000) + "],[" + GlTexture.getCount() + "/" + (GlTexture.getEstimatedTotalSize()/1_000_000)+"]");
         //Sodium-visible sections drive the hole-punch mask's fill cost (see the "CB" GPU marker)
         debug.add("Mask sections (sodium visible): " + this.chunkBoundRenderer.getLastRenderedSectionCount());

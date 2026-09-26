@@ -26,7 +26,7 @@ public abstract class MixinSableReacharoundCulling {
             Matrix4f projection,
             float partialTicks
     ) {
-        return SableReacharoundCulling.filter(subLevels, cameraX, cameraZ);
+        return SableReacharoundCulling.filter(subLevels, cameraX, cameraY, cameraZ, modelView, projection);
     }
 
     @ModifyVariable(method = "renderBlockEntities", at = @At("HEAD"), argsOnly = true, ordinal = 0)
@@ -39,7 +39,7 @@ public abstract class MixinSableReacharoundCulling {
             double cameraZ,
             float partialTicks
     ) {
-        return SableReacharoundCulling.filter(subLevels, cameraX, cameraZ);
+        return SableReacharoundCulling.filter(subLevels, cameraX, cameraY, cameraZ, null, null);
     }
 
     @ModifyVariable(method = "renderAfterSections", at = @At("HEAD"), argsOnly = true, ordinal = 0)
@@ -53,6 +53,6 @@ public abstract class MixinSableReacharoundCulling {
             Matrix4f projection,
             float partialTicks
     ) {
-        return SableReacharoundCulling.filter(subLevels, cameraX, cameraZ);
+        return SableReacharoundCulling.filter(subLevels, cameraX, cameraY, cameraZ, modelView, projection);
     }
 }

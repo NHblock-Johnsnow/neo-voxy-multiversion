@@ -163,7 +163,7 @@ public final class DistantLaserRenderer implements LodPipelineHooks.TranslucentR
                         .rotate(rotation).scale(source.halfWidth, source.halfWidth, length);
                 DistantShaders.uploadTransform(transform);
                 glUniform4f(colorUniform, source.red, source.green, source.blue, source.alpha);
-                unitBeam.draw();
+                unitBeam.drawTranslucent(viewport, transform);
             }
         } finally {
             glBindVertexArray(0);
@@ -172,7 +172,7 @@ public final class DistantLaserRenderer implements LodPipelineHooks.TranslucentR
     }
 
     private static DistantMesh bakeUnitBeam() {
-        var builder = new DistantMeshBuilder();
+        var builder = new DistantMeshBuilder(false);
         try {
             Vec3 start = Vec3.ZERO;
             Vec3 end = new Vec3(0, 0, 1);

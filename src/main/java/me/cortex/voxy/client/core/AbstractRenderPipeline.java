@@ -6,6 +6,7 @@ import me.cortex.voxy.client.VoxyClient;
 import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.model.ModelBakerySubsystem;
 import me.cortex.voxy.client.core.rendering.Viewport;
+import me.cortex.voxy.client.core.rendering.LodViewState;
 import me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager;
 import me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser;
 import me.cortex.voxy.client.core.rendering.hierachical.NodeCleaner;
@@ -15,6 +16,7 @@ import me.cortex.voxy.client.core.rendering.util.DepthFramebuffer;
 import me.cortex.voxy.client.core.rendering.util.DownloadStream;
 import me.cortex.voxy.client.core.util.GPUTiming;
 import me.cortex.voxy.common.util.TrackedObject;
+import net.minecraft.client.Minecraft;
 import org.joml.Matrix4f;
 import org.lwjgl.opengl.GL30;
 import org.lwjgl.system.MemoryUtil;
@@ -56,12 +58,8 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
     protected AbstractSectionRenderer<?,?> sectionRenderer;
 
-    //Command-list hold state (experimentalCmdListHold). lastBuildMVP and lastBuildCam* are the
-    //camera the current command lists were built for. The MVP carries rotation and projection
-    //only - the translation lives in viewport.section/innerTranslation - so the position must be
-    //keyed separately or a straight-line flight would count as a still camera. hasBuiltCommandLists
-    //guards the first frame - the identity-initialised matrix must never pass the compare on its own.
-    private final Matrix4f lastBuildMVP = new Matrix4f();
+    // MVP 不含相机世界坐标，复用时还需比较位置、屏幕尺寸及精度配置。
+    private final LodViewState lastBuildView = new LodViewState();
     private double lastBuildCamX, lastBuildCamY, lastBuildCamZ;
     //Vanilla folds the decaying view bob into the projection for ~10 s after the player stops, so a
     //bit-exact MVP compare would keep the hold off for that long. The tolerance is far below a
@@ -69,7 +67,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     private static final float HOLD_MVP_TOLERANCE = 1.0e-6f;
     private boolean hasBuiltCommandLists;
     private Viewport<?> lastBuildViewport;
-    private int lastBuildWidth, lastBuildHeight;
     private int consecutiveHolds;
     private long heldFrameCount, builtFrameCount;
 
@@ -148,14 +145,13 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             //it compares visibility stamps against the PREVIOUS build's frameId, then restamps with
             //the current one - which becomes the baseline for the next build.
             viewport.prevBuildFrameId = viewport.frameId;
-            this.lastBuildMVP.set(viewport.MVP);
+            this.lastBuildView.set(viewport.MVP, viewport.width, viewport.height,
+                    VoxyConfig.CONFIG.subDivisionSize, (Minecraft.getInstance().options.renderDistance().get() + 2) * 16.0);
             this.lastBuildCamX = viewport.cameraX;
             this.lastBuildCamY = viewport.cameraY;
             this.lastBuildCamZ = viewport.cameraZ;
             this.hasBuiltCommandLists = true;
             this.lastBuildViewport = viewport;
-            this.lastBuildWidth = viewport.width;
-            this.lastBuildHeight = viewport.height;
             this.consecutiveHolds = 0;
             this.builtFrameCount++;
         } else {
@@ -304,12 +300,13 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         boolean holdEligible = VoxyConfig.CONFIG.experimentalCmdListHold
                 && this.hasBuiltCommandLists
                 && this.lastBuildViewport == viewport
-                && this.lastBuildWidth == viewport.width && this.lastBuildHeight == viewport.height
                 && this.consecutiveHolds < VoxyConfig.CONFIG.cmdListHoldMaxFrames - 1
                 && viewport.cameraX == this.lastBuildCamX
                 && viewport.cameraY == this.lastBuildCamY
                 && viewport.cameraZ == this.lastBuildCamZ
-                && viewport.MVP.equals(this.lastBuildMVP, HOLD_MVP_TOLERANCE);
+                && this.lastBuildView.matches(viewport.MVP, viewport.width, viewport.height,
+                        VoxyConfig.CONFIG.subDivisionSize, (Minecraft.getInstance().options.renderDistance().get() + 2) * 16.0,
+                        HOLD_MVP_TOLERANCE);
 
         boolean built = false;
         boolean mipChainBuilt = false;

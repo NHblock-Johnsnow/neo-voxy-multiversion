@@ -154,7 +154,7 @@ public final class DistantTrackRenderer implements LodPipelineHooks.Renderer {
                         (float) (unit.oy - camY),
                         (float) (unit.oz - camZ));
                 DistantShaders.uploadTransform(transform);
-                unit.mesh.draw();
+                unit.mesh.drawAt(viewport, unit.ox, unit.oy, unit.oz);
                 drawn++;
             }
         } finally {

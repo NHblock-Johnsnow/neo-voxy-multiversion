@@ -347,6 +347,7 @@ sourceSets {
     verification {
         java.srcDir 'src/verification/java'
         compileClasspath += sourceSets.main.output
+        compileClasspath += sourceSets.main.compileClasspath
         runtimeClasspath += output + compileClasspath
     }
 }
@@ -390,6 +391,26 @@ tasks.register('verifyRocksDBLifecycle', JavaExec) {
 
 tasks.named('check') {
     dependsOn tasks.named('verifyRocksDBLifecycle')
+}
+
+tasks.register('verifyDistantMeshLod', JavaExec) {
+    group = 'verification'
+    description = 'Verifies mesh simplification, coverage and screen-space error bounds'
+    dependsOn tasks.named('verificationClasses')
+    classpath = sourceSets.verification.runtimeClasspath
+    mainClass = 'me.cortex.voxy.client.compat.create.DistantMeshLodVerification'
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('verifyDistantMeshLod')
+}
+
+tasks.register('verifyDistantMeshGpu', JavaExec) {
+    group = 'verification'
+    description = 'Runs optional OpenGL 4.6 distant-mesh regression checks'
+    dependsOn tasks.named('verificationClasses')
+    classpath = sourceSets.verification.runtimeClasspath + sourceSets.main.runtimeClasspath
+    mainClass = 'me.cortex.voxy.client.compat.create.DistantMeshGpuVerification'
 }
 
 jar {

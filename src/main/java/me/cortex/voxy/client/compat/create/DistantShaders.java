@@ -153,7 +153,7 @@ public final class DistantShaders {
                 .compile().name(uniformLightVariant ? "distant_patched_uniform" : "distant_patched_vertex");
     }
 
-    private static String patchedVertex(AbstractRenderPipeline pipeline) {
+    public static String patchedVertex(AbstractRenderPipeline pipeline) {
         String source = ShaderLoader.parse("voxy:compat/distant.vert");
         String taa = pipeline.taaFunction("distantTaaShift");
         return source + "\n" + (taa != null ? taa : "vec2 distantTaaShift() { return vec2(0.0); }");

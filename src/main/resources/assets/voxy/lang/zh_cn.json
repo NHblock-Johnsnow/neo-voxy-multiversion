@@ -33,7 +33,7 @@
   "voxy.config.general.rendering": "Voxy 渲染",
   "voxy.config.general.rendering.tooltip": "启用或禁用 Voxy 渲染",
   "voxy.config.general.subDivisionSize": "渲染精度",
-  "voxy.config.general.subDivisionSize.tooltip": "调节远景地形的细节，向右拖动提高精度，默认第 4 档“标准”。\n取舍：高档位保留更多地形细节，但会增加地形构建、显存和显卡负担，可能降低帧率；低档位更省资源，但远景更粗糙、细节切换更明显。\n七档对应原细分值：1024、768、512、256、123、64、28。已有设置会匹配最接近的档位。",
+  "voxy.config.general.subDivisionSize.tooltip": "调节远景地形与专属模型的细节，向右提高精度，默认第 4 档“标准”。\n低档位会更早使用 Domum、Copycat/LittleTiles 不透明模型、列车、转向架、轨道、构件和动力部件的粗网格，并减少电线分段；高档位保留更多细节，但增加显卡负担。专属粗网格与地形共用区段划分和细分规则；近处及交接区域保留完整模型，放大视野或提高分辨率会恢复细节。\n粗模型切换可能出现轮廓、贴图或光照细节变化；预先生成粗网格会增加烘焙耗时和内存/显存占用。半透明专属模型仅做安全共面合并，光柱、激光保留最简形状；Sable 仍使用原生完整几何，仅小目标剔除受精度影响。\n七档原细分值：1024、768、512、256、123、64、28。已有设置匹配最近档位。",
   "voxy.config.general.renderDistance": "渲染距离",
   "voxy.config.general.renderDistance.tooltip": "Voxy 的渲染距离，单位为区块",
   "voxy.config.general.renderPressure": "LOD 构建压力",

@@ -18,12 +18,25 @@ import java.util.function.Predicate;
 public final class DistantMeshBuilder {
     private ByteBuffer buffer;
     private int vertexCount;
+    private final boolean allowLod;
+    private boolean mergeTranslucent;
     private final Vector4f scratch = new Vector4f();
     private final org.joml.Vector3f normalScratch = new org.joml.Vector3f();
     private final RandomSource random = RandomSource.create(42);
 
     public DistantMeshBuilder() {
+        this(true);
+    }
+
+    public DistantMeshBuilder(boolean allowLod) {
+        this.allowLod = allowLod;
         this.buffer = MemoryUtil.memAlloc(64 * 1024);
+    }
+
+    public static DistantMeshBuilder translucent() {
+        var builder = new DistantMeshBuilder(false);
+        builder.mergeTranslucent = true;
+        return builder;
     }
 
     // ---- 顶点写入 ------------------------------------------------------
@@ -235,6 +248,7 @@ public final class DistantMeshBuilder {
     public static final class CpuMesh {
         private ByteBuffer buffer;
         public final int quadCount;
+        private DistantMeshLod lod;
         public float minX, minY, minZ, maxX, maxY, maxZ;
 
         private CpuMesh(ByteBuffer buffer, int quadCount) {
@@ -243,13 +257,14 @@ public final class DistantMeshBuilder {
         }
 
         public int byteSize() {
-            return this.buffer == null ? 0 : this.buffer.limit();
+            return this.buffer == null ? 0 : this.buffer.limit() + (int) this.lod.byteSize();
         }
 
         public void free() {
             if (this.buffer != null) {
                 MemoryUtil.memFree(this.buffer);
                 this.buffer = null;
+                this.lod = null;
             }
         }
     }
@@ -265,7 +280,12 @@ public final class DistantMeshBuilder {
         //Truncate any trailing partial quad from a capture stream
         this.buffer.flip();
         this.buffer.limit(quadCount * 4 * DistantMesh.STRIDE);
+        if (this.mergeTranslucent) {
+            quadCount = DistantQuadMerger.compact(this.buffer, quadCount);
+            this.buffer.limit(quadCount * 4 * DistantMesh.STRIDE);
+        }
         var cpu = new CpuMesh(this.buffer, quadCount);
+        cpu.lod = this.allowLod ? DistantMeshLod.build(this.buffer, quadCount) : DistantMeshLod.EMPTY;
         cpu.minX = this.minX; cpu.minY = this.minY; cpu.minZ = this.minZ;
         cpu.maxX = this.maxX; cpu.maxY = this.maxY; cpu.maxZ = this.maxZ;
         //Ownership moves to the CpuMesh - discard() must not free it from under the new owner
@@ -279,7 +299,7 @@ public final class DistantMeshBuilder {
             return null;
         }
         try {
-            var mesh = new DistantMesh(cpu.buffer, cpu.quadCount);
+            var mesh = new DistantMesh(cpu.buffer, cpu.quadCount, cpu.lod);
             mesh.minX = cpu.minX; mesh.minY = cpu.minY; mesh.minZ = cpu.minZ;
             mesh.maxX = cpu.maxX; mesh.maxY = cpu.maxY; mesh.maxZ = cpu.maxZ;
             return mesh;
@@ -291,6 +311,17 @@ public final class DistantMeshBuilder {
     //Uploads and frees the CPU buffer; returns null for empty meshes
     public DistantMesh build() {
         return upload(this.assemble());
+    }
+
+    public DistantMesh buildPolyline() {
+        var cpu = this.assemble();
+        if (cpu == null) return null;
+        try {
+            cpu.lod = DistantPolylineLod.build(cpu.buffer, cpu.quadCount);
+            return upload(cpu);
+        } finally {
+            cpu.free();
+        }
     }
 
     //Frees the native buffer without building - for exception paths that abandon a partial bake, so

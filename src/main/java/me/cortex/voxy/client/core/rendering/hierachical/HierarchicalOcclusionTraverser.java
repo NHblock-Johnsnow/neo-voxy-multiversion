@@ -202,9 +202,8 @@ public class HierarchicalOcclusionTraverser {
         viewport.innerTranslation.getToAddress(ptr); ptr += 4*3;
 
 
-        final float screenspaceAreaDecreasingSize = VoxyConfig.CONFIG.subDivisionSize*VoxyConfig.CONFIG.subDivisionSize;
         //Screen space size for descending
-        MemoryUtil.memPutFloat(ptr, (float) (screenspaceAreaDecreasingSize) /(viewport.width*viewport.height)); ptr += 4;
+        MemoryUtil.memPutFloat(ptr, viewport.lodSelection.minScreenArea); ptr += 4;
 
         setFrustum(viewport, ptr); ptr += 4*4*6;
 
@@ -225,19 +224,13 @@ public class HierarchicalOcclusionTraverser {
 
         //Nodes inside vanilla render distance (+2 chunks) always subdivide to lvl0 so the seam ring
         //geometry matches vanilla. Kept narrow, widening it costs real section counts.
-        float fullDetailDist = (net.minecraft.client.Minecraft.getInstance().options.renderDistance().get() + 2) * 16f;
-        MemoryUtil.memPutFloat(ptr, fullDetailDist*fullDetailDist);ptr += 4;
-
-        float p00 = Math.max(0.0001f, viewport.vanillaProjection.m00());
-        float p11 = Math.max(0.0001f, viewport.vanillaProjection.m11());
-        float invP00 = 1.0f / p00;
-        float invP11 = 1.0f / p11;
-        MemoryUtil.memPutFloat(ptr, invP00);ptr += 4;
-        MemoryUtil.memPutFloat(ptr, invP11);ptr += 4;
+        MemoryUtil.memPutFloat(ptr, viewport.lodSelection.fullDetailDistanceSquared);ptr += 4;
+        MemoryUtil.memPutFloat(ptr, viewport.lodSelection.invP00);ptr += 4;
+        MemoryUtil.memPutFloat(ptr, viewport.lodSelection.invP11);ptr += 4;
         //stretchMax = stretch() evaluated at the screen edge (tan = 1/P00,1/P11): a frame constant the
         //shader divided into every node's stretch. Precompute it here so shouldDecend drops a per-node
         //pow() and just reads this uniform.
-        MemoryUtil.memPutFloat(ptr, (float) Math.pow(1.0 + (double) invP00 * invP00 + (double) invP11 * invP11, 1.5));ptr += 4;
+        MemoryUtil.memPutFloat(ptr, viewport.lodSelection.stretchMax);ptr += 4;
         MemoryUtil.memPutInt(ptr, this.requestClock); ptr += 4;
     }
 

@@ -210,7 +210,8 @@ public final class CopycatDistantRenderer implements LodPipelineHooks.Renderer, 
                 transform.set(viewport.MVP).translate((float) (ox - viewport.cameraX),
                         (float) (oy - viewport.cameraY), (float) (oz - viewport.cameraZ));
                 DistantShaders.uploadTransform(transform);
-                mesh.draw();
+                if (translucent) mesh.drawTranslucent(viewport, transform);
+                else mesh.drawAt(viewport, ox, oy, oz);
             }
             if (bound) {
                 glBindVertexArray(0);
@@ -295,7 +296,7 @@ public final class CopycatDistantRenderer implements LodPipelineHooks.Renderer, 
     private static Meshes bake(long key, int[] blocks, Mapper mapper, ClientLevel level) {
         int sx = BlockPos.getX(key), sy = BlockPos.getY(key), sz = BlockPos.getZ(key);
         var opaque = new DistantMeshBuilder();
-        var translucent = new DistantMeshBuilder();
+        var translucent = DistantMeshBuilder.translucent();
         DistantMeshBuilder.CpuMesh opaqueCpu = null;
         DistantMeshBuilder.CpuMesh translucentCpu = null;
         DistantMesh opaqueMesh = null;

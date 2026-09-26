@@ -70,5 +70,6 @@ bool modelIsCreateTrack(BlockModel model) {
 }
 
 float modelFluidHeight(BlockModel model) {
-    return float((model.flagsA >> 8u) & 31u) / 9.0;
+    // 高度占 8..11 位，12 位是流体标记。
+    return float((model.flagsA >> 8u) & 15u) / 9.0;
 }

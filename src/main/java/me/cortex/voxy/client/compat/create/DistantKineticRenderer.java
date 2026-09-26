@@ -120,7 +120,7 @@ public final class DistantKineticRenderer implements LodPipelineHooks.Renderer {
 
                 transform.set(viewProjection).translate((float) (ox - camX), (float) (oy - camY), (float) (oz - camZ));
                 DistantShaders.uploadTransform(transform);
-                bucket.mesh.draw();
+                bucket.mesh.drawAt(viewport, ox, oy, oz);
                 drawn++;
             }
             if (renderStateActive) {

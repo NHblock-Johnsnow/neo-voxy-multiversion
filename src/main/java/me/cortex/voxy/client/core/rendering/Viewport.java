@@ -51,6 +51,7 @@ public abstract class Viewport <A extends Viewport<A>> {
     public double cameraZ;
 
     public final Matrix4f MVP = new Matrix4f();
+    public final NativeLodSelection lodSelection = new NativeLodSelection();
     public final Vector3i section = new Vector3i();
     public final Vector3f innerTranslation = new Vector3f();
 
@@ -129,6 +130,9 @@ public abstract class Viewport <A extends Viewport<A>> {
     public A update() {
         //MVP
         this.projection.mul(this.modelView, this.MVP);
+        this.lodSelection.update(this.MVP, this.vanillaProjection, this.width, this.height,
+                this.cameraX, this.cameraY, this.cameraZ, VoxyConfig.CONFIG.subDivisionSize,
+                (net.minecraft.client.Minecraft.getInstance().options.renderDistance().get() + 2) * 16f);
 
         //Update the frustum
         this.frustum.set(this.MVP, false);

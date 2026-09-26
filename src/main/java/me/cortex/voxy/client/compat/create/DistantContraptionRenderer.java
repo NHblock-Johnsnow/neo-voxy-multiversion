@@ -126,7 +126,7 @@ public final class DistantContraptionRenderer implements LodPipelineHooks.Render
                 glUniform2f(4,
                         (DistantLightSampler.block(light) * 16 + 8) / 256.0f,
                         (DistantLightSampler.sky(light) * 16 + 8) / 256.0f);
-                snap.mesh().mesh.draw();
+                snap.mesh().mesh.drawModel(viewport, snap.local(), snap.x(), snap.y(), snap.z());
                 drawn++;
             }
             if (renderStateActive) {

@@ -255,7 +255,8 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
                 transform.set(viewport.MVP).translate((float) (ox - viewport.cameraX),
                         (float) (oy - viewport.cameraY), (float) (oz - viewport.cameraZ));
                 DistantShaders.uploadTransform(transform);
-                mesh.draw();
+                if (translucent) mesh.drawTranslucent(viewport, transform);
+                else mesh.drawAt(viewport, ox, oy, oz);
             }
             if (bound) {
                 glBindVertexArray(0);
@@ -275,7 +276,7 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
         var occupied = new it.unimi.dsi.fastutil.ints.IntOpenHashSet(snapshot.cells().size() * 2);
         for (var cell : snapshot.cells()) occupied.add(cell.coordinate());
         var opaqueBuilder = new DistantMeshBuilder();
-        var translucentBuilder = new DistantMeshBuilder();
+        var translucentBuilder = DistantMeshBuilder.translucent();
         try {
             for (var cell : snapshot.cells()) {
                 int coordinate = cell.coordinate();

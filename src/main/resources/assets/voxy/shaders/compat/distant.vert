@@ -14,6 +14,7 @@ layout(location = 6) in uint aCustomId;
 
 //Full transform: (pipeline MVP or vanilla proj*view) * model
 layout(location = 0) uniform mat4 uTransform;
+layout(location = 6) uniform vec3 uMeshLod;
 #ifdef UNIFORM_LIGHT
 //Moving meshes bake without light; one light level per draw
 layout(location = 4) uniform vec2 uLightUv;
@@ -41,13 +42,19 @@ vec2 distantTaaShift();
 #endif
 
 void main() {
-    gl_Position = uTransform * vec4(aPos, 1.0);
+    vec3 position = aPos;
+    if (uMeshLod.x > 0.0) position = floor(aPos / uMeshLod.x) * uMeshLod.x;
+    if (uMeshLod.z > 0.0) {
+        vec3 coarse = floor(aPos / uMeshLod.y) * uMeshLod.y;
+        position = mix(position, coarse, uMeshLod.z);
+    }
+    gl_Position = uTransform * vec4(position, 1.0);
     #ifdef PATCHED_SHADER
     gl_Position.xy += distantTaaShift() * gl_Position.w;
     #endif
     #ifdef TRAIN_DEPTH_REPLAY
     // 回写沿用原版投影，LOD 遮挡采样则匹配光影抖动。
-    fLodClip = uLodTransform * vec4(aPos, 1.0);
+    fLodClip = uLodTransform * vec4(position, 1.0);
     fLodClip.xy += distantTaaShift() * fLodClip.w;
     #endif
     fUv = aUv;

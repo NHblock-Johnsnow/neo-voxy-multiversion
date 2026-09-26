@@ -105,6 +105,7 @@ public final class LodPipelineHooks {
     public static void beforeTranslucent(AbstractRenderPipeline pipeline,
                                          Viewport<?> viewport,
                                          int depthFunc) {
+        me.cortex.voxy.client.compat.create.DistantMesh.beginFrame();
         if (RENDERERS.isEmpty()) {
             return;
         }

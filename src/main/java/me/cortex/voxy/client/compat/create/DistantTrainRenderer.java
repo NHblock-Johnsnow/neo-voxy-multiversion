@@ -60,6 +60,8 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
 
     private static final class DepthDraw {
         DistantMesh mesh;
+        int level;
+        float blend;
         final Matrix4f model = new Matrix4f();
     }
 
@@ -198,14 +200,14 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
                             (DistantLightSampler.sky(track.lightPacked) * 16 + 8) / 256.0f);
                     //Net model yaw of the transform chain above (pitch omitted - low grades)
                     DistantShaders.uploadFaceRotation(-yaw + entry.initialYaw());
-                    entry.mesh().mesh.draw();
+                    entry.mesh().mesh.drawModel(viewport, model, camX, camY, camZ);
                     recordDepthDraw(entry.mesh().mesh, model);
                     drawn++;
 
                     //Bogeys draw as captured snapshot meshes through the same shader (light uniform
                     //is already set to the carriage's); works identically on both pipelines
                     if (bogeyMeshProvider != null && !entry.bogeys().isEmpty()) {
-                        drawBogeys(track, entry, t, camX, camY, camZ, viewProjection, transform, model);
+                        drawBogeys(track, entry, t, camX, camY, camZ, viewport, viewProjection, transform, model);
                     }
                 }
             }
@@ -233,7 +235,7 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
     //Interpolates each bogey pose and draws its snapshot mesh. Transform mirrors the tail of
     //the -1.5078125 style offset is baked into the captured mesh. Wheel spin is a P4 follow-up.
     private static void drawBogeys(DistantTrainManager.CarriageTrack track, DistantTrainManager.ShapeEntry entry,
-                                   float t, double camX, double camY, double camZ, Matrix4f viewProjection,
+                                   float t, double camX, double camY, double camZ, Viewport<?> viewport, Matrix4f viewProjection,
                                    Matrix4f transform, Matrix4f model) {
         List<BogeyPose> cur = track.cur.bogeys();
         List<BogeyPose> prev = track.prev != null ? track.prev.bogeys() : cur;
@@ -262,7 +264,7 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
             transform.set(viewProjection).mul(model);
             DistantShaders.uploadTransform(transform);
             DistantShaders.uploadFaceRotation(yaw);
-            mesh.draw();
+            mesh.drawModel(viewport, model, camX, camY, camZ);
             recordDepthDraw(mesh, model);
         }
     }
@@ -285,6 +287,8 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
         }
         depthDrawCount++;
         draw.mesh = mesh;
+        draw.level = mesh.lastDrawLevel();
+        draw.blend = mesh.lastDrawBlend();
         draw.model.set(model);
     }
 
@@ -319,7 +323,7 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
                 transform.set(viewport.MVP).mul(draw.model).get(lodTransform);
                 glUniformMatrix4fv(8, false, lodTransform);
                 DistantShaders.uploadTransform(transform.set(sourceViewProjection).mul(draw.model));
-                draw.mesh.draw();
+                draw.mesh.draw(draw.level, draw.blend);
             }
         }
         glBindVertexArray(0);

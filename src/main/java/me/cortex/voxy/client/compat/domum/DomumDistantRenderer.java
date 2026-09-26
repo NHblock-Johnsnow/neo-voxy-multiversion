@@ -207,7 +207,7 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
                 transform.set(viewport.MVP).translate((float) (ox - viewport.cameraX),
                         (float) (oy - viewport.cameraY), (float) (oz - viewport.cameraZ));
                 DistantShaders.uploadTransform(transform);
-                entry.mesh.draw();
+                entry.mesh.drawAt(viewport, ox, oy, oz);
             }
             if (bound) {
                 glBindVertexArray(0);

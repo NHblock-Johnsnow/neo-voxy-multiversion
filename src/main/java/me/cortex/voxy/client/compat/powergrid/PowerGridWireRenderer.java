@@ -245,7 +245,7 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
                 transform.set(viewport.MVP).translate((float) (ox - viewport.cameraX),
                         (float) (oy - viewport.cameraY), (float) (oz - viewport.cameraZ));
                 DistantShaders.uploadTransform(transform);
-                mesh.draw();
+                mesh.drawThin(viewport, transform, ox, oy, oz);
                 drawn++;
             }
         } finally {
@@ -258,7 +258,7 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
     }
 
     private static DistantMesh bake(ClientLevel level, Source s) {
-        var builder = new DistantMeshBuilder();
+        var builder = new DistantMeshBuilder(false);
         try {
             var sprite = Minecraft.getInstance().getBlockRenderer().getBlockModel(Blocks.WHITE_CONCRETE.defaultBlockState())
                     .getParticleIcon(net.neoforged.neoforge.client.model.data.ModelData.EMPTY);
@@ -277,7 +277,7 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
                     emitPrism(builder, previous, next, Math.max(0.0225f, s.thickness), u, v,
                             DistantLightSampler.sky(light), DistantLightSampler.block(light), s.color);
                 }
-                return builder.build();
+                return builder.buildPolyline();
             }
             double hx = s.x2 - s.x1, hz = s.z2 - s.z1, horizontal = Math.sqrt(hx * hx + hz * hz);
             double vertical = s.y2 - s.y1;
@@ -293,7 +293,7 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
                         DistantLightSampler.sky(light), DistantLightSampler.block(light), s.color);
                 previous = next;
             }
-            return builder.build();
+            return builder.buildPolyline();
         } catch (Throwable t) {
             builder.discard();
             Logger.error("Baking PowerGrid wire LOD", t);
