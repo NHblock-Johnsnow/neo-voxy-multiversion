@@ -1,5 +1,17 @@
 Neo Voxy 更新日志 / Changelog
 
+## 0.5.0-alpha.12（1.21.1 NeoForge）— 2026-09-26
+
+### 简体中文
+
+- 修复实体恰占一半时，薄墙、屋顶等结构在粗 LOD 中消失的问题。
+- 修复区段边界的表层标记在后续降采样中被当作空气丢失，保留原有平面高度修正。
+
+### English
+
+- Fixed thin walls, roofs and other half-occupied structures disappearing in coarse LODs.
+- Fixed pending surface markers at section boundaries being discarded as air during further downsampling, retaining the existing flat-terrain height correction.
+
 ## 0.5.0-alpha.11（1.21.1 NeoForge）— 2026-09-26
 
 ### 简体中文

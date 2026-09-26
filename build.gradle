@@ -365,8 +365,17 @@ tasks.register('verifyWorldSectionPositions', JavaExec) {
     mainClass = 'me.cortex.voxy.common.world.WorldSectionPositionVerification'
 }
 
+tasks.register('verifyTerrainMips', JavaExec) {
+    group = 'verification'
+    description = 'Verifies terrain occupancy, thin surfaces and mip boundaries'
+    dependsOn tasks.named('verificationClasses')
+    classpath = sourceSets.verification.runtimeClasspath
+    mainClass = 'me.cortex.voxy.common.world.TerrainMipperVerification'
+}
+
 tasks.named('check') {
     dependsOn tasks.named('verifyWorldSectionPositions')
+    dependsOn tasks.named('verifyTerrainMips')
 }
 
 tasks.register('verifyLiveHandoff', JavaExec) {

@@ -17,7 +17,7 @@ Neo Voxy is maintained by **JohnSnow**. It continues [NHblock714/voxy](https://g
 
 | Edition | Install side | Renderer dependency | Java | Release file |
 |---|---|---|---:|---|
-| Minecraft 1.21.1 · NeoForge | Client required, server optional | Sodium 0.8.x / Iris 1.8.12+ | 21 | `neo-voxy-0.5.0-alpha.11-mc1.21.1-neoforge.jar` |
+| Minecraft 1.21.1 · NeoForge | Client required, server optional | Sodium 0.8.x / Iris 1.8.12+ | 21 | `neo-voxy-0.5.0-alpha.12-mc1.21.1-neoforge.jar` |
 | Minecraft 1.20.1 · Forge | Client only | Embeddium / Oculus | 17 | `neo-voxy-0.3.5-alpha.2-mc1.20.1-forge-client.jar` |
 | Minecraft 26.1.2 · NeoForge | Client only | Sodium 0.9.2 / Iris 1.11.4+ | 25 | `neo-voxy-0.3.4-mc26.1.2-neoforge-client.jar` |
 

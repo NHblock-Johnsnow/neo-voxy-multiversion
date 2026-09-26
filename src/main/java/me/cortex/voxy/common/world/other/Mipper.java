@@ -117,6 +117,17 @@ public final class Mipper {
     public static long mip(long i000, long i100, long i001, long i101,
                            long i010, long i110, long i011, long i111,
                            Mapper mapper) {
+        // 边界表层尚未回填，仍需参与下一层取样，不能被空气快捷路径吞掉。
+        if (Mapper.isSurfaceCarrier(i000 | i100 | i001 | i101 | i010 | i110 | i011 | i111)) {
+            i000 = restorePendingSurface(i000);
+            i100 = restorePendingSurface(i100);
+            i001 = restorePendingSurface(i001);
+            i101 = restorePendingSurface(i101);
+            i010 = restorePendingSurface(i010);
+            i110 = restorePendingSurface(i110);
+            i011 = restorePendingSurface(i011);
+            i111 = restorePendingSurface(i111);
+        }
         long differingBlockBits = (i000 ^ i100) | (i000 ^ i001) | (i000 ^ i101)
                 | (i000 ^ i010) | (i000 ^ i110) | (i000 ^ i011) | (i000 ^ i111);
         if ((differingBlockBits & BLOCK_ID_MASK) == 0L) {
@@ -254,7 +265,8 @@ public final class Mipper {
                             && scratch.stateUniqueIndex[7] < 0;
                     long selectedState = withLight(states[selected], downsampleLight(blockLight, skyLight));
                     if (flatSurfaceTie) return Mapper.makeSurfaceCarrier(selectedState);
-                    if (nonAir > 4) return selectedState;
+                    // 平票时保留屋顶和薄墙；仅下半层平面使用表层下移修正。
+                    return selectedState;
                 }
             }
         }
@@ -262,6 +274,10 @@ public final class Mipper {
         // Do not return an arbitrary solid child when minority occupancy rounded
         // to air. Maximum skylight also prevents successive mips turning open air black.
         return withLight(nonAir == 0 ? i111 : 0L, downsampleLight(blockLight, skyLight));
+    }
+
+    private static long restorePendingSurface(long voxel) {
+        return Mapper.isSurfaceCarrier(voxel) ? Mapper.restoreSurfaceCarrier(voxel) : voxel;
     }
 
     private static final class Scratch {
