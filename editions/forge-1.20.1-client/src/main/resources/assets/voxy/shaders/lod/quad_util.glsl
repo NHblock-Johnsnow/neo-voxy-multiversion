@@ -110,10 +110,7 @@ uvec3 makeRemainingAttributes(const in BlockModel model, const in Quad quad, uin
 
     vec4 tinting = getLighting(lighting);
 
-    uint conditionalTinting = 0;
-    if (tintColour != uint(-1)) {
-        conditionalTinting = tintColour;
-    }
+    uint conditionalTinting = tintColour;
 
     uint addin = 0;
     if (!isTranslucent) {
