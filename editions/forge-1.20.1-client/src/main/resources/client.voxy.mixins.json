@@ -49,7 +49,6 @@
 
     "sodium.AccessorChunkTracker",
     "sodium.AccessorSodiumWorldRenderer",
-    "sodium.AccessorRenderSectionManager",
     "sodium.MixinChunkJobQueue",
     "sodium.MixinCloudRenderer",
     // "sodium.MixinDefaultChunkRenderer",
