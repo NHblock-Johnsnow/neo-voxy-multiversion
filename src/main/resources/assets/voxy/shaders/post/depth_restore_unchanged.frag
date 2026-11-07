@@ -11,7 +11,7 @@ void main() {
     float merged = texture(mergedDepthTex, UV).r;
     float after = texture(afterDepthTex, UV).r;
 
-    if (after < merged - (2.0 / ((1 << 24) - 1))) {
+        if (after < merged) {
         gl_FragDepth = after;
     } else {
         gl_FragDepth = before;

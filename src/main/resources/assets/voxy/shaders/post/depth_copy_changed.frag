@@ -9,7 +9,7 @@ void main() {
     float beforeDepth = texture(beforeDepthTex, UV).r;
     float afterDepth = texture(afterDepthTex, UV).r;
 
-    if (afterDepth >= beforeDepth - (2.0 / ((1 << 24) - 1))) {
+    if (afterDepth >= beforeDepth) {
         discard;
     }
 
