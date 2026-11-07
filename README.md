@@ -39,23 +39,23 @@ Neo Voxy 由 **JohnSnow** 维护，基于 [NHblock714/voxy](https://github.com/N
 | 世界曲率 | ✅ | ✅ | ✅ | 在 GPU 顶点阶段弯曲远景地形 |
 | LOD信标光束 | ✅ | — | — | 在远距离显示信标光束 |
 
-`✅` 表示支持，`❌` 表示未提供，`—` 表示不适用。圆形 LOD 交接与光影包自带的交接功能同时启用时，建议关闭其中一项。
+`✅` 表示支持，`❌` 表示未提供，`—` 表示不适用。
 
 ## Mod 联动功能
 
-联动功能仅在对应 Mod 已安装时启用。版本列表示当前联动代码的 Minecraft 与 Mod 验证基线。
+联动功能仅在对应 Mod 已安装时启用。目前1.21.1完全支持，1.20.1部分支持。
 
 | Mod（中文 / English）与版本 | 状态 | 联动功能 |
 |---|:---:|---|
-| [机械动力 / Create](https://www.curseforge.com/minecraft/mc-mods/create)<br>MC 1.21.1 + Create 6.0.10 | ✅ | LOD远景列车、轨道、动态结构与动力部件 |
-| [机械动力：航空学 / Create Aeronautics](https://www.curseforge.com/minecraft/mc-mods/create-aeronautics)<br>MC 1.21.1 + Aeronautics 1.3.2 | 🧪 | 激光指示器LOD光束 |
-| [机械动力：交错电网 / Create: Power Grid](https://www.curseforge.com/minecraft/mc-mods/power-grid)<br>MC 1.21.1 + Power Grid 0.6.1 | ✅ | LOD悬垂线、软线和灯串线 |
-| [机械动力：伪装方块+ / Create: Copycats+](https://www.curseforge.com/minecraft/mc-mods/copycats)<br>MC 1.21.1 + Copycats+ 3.0.9 | ✅ | 斜坡、切片、门、传动杆和齿轮的专属 LOD 模型与材质 |
-| [Sable / Sable](https://www.curseforge.com/minecraft/mc-mods/sable)<br>MC 1.21.1 + Sable 2.0.5 | ✅ | LOD载具 |
-| [节气 / Ecliptic Seasons](https://www.curseforge.com/minecraft/mc-mods/ecliptic-seasons)<br>MC 1.21.1 + Ecliptic Seasons 0.15.0-rc-3-1 | ✅ | LOD季节积雪、结冰水体、季节模型与颜色 |
-| [模拟殖民地 / Domum Ornamentum](https://www.curseforge.com/minecraft/mc-mods/domum-ornamentum)<br>MC 1.21.1 + Domum Ornamentum 1.0.236-snapshot | ✅ | LOD DO模型与材质 |
-| [框架方块 / FramedBlocks](https://www.curseforge.com/minecraft/mc-mods/framedblocks)<br>MC 1.21.1 + FramedBlocks 10.6.1 | ✅ | LOD框架方块与伪装材质 |
-| [小方块 / LittleTiles](https://www.curseforge.com/minecraft/mc-mods/littletiles)<br>MC 1.21.1 + LittleTiles 1.6.0-pre226 | 🧪 | 仅测试功能，性能较差 |
+| [机械动力](https://www.curseforge.com/minecraft/mc-mods/create)<br>MC 1.21.1 + Create 6.0.10 | ✅ | LOD远景列车、轨道、动态结构与动力部件 |
+| [机械动力：航空学](https://www.curseforge.com/minecraft/mc-mods/create-aeronautics)<br>MC 1.21.1 + Aeronautics 1.3.2 | 🧪 | 激光指示器LOD光束 |
+| [机械动力：交错电网](https://www.curseforge.com/minecraft/mc-mods/power-grid)<br>MC 1.21.1 + Power Grid 0.6.1 | ✅ | LOD悬垂线、软线和灯串线 |
+| [机械动力：伪装方块+](https://www.curseforge.com/minecraft/mc-mods/copycats)<br>MC 1.21.1 + Copycats+ 3.0.9 | ✅ | 斜坡、切片、传动杆和齿轮的专属 LOD 模型 |
+| [Sable](https://www.curseforge.com/minecraft/mc-mods/sable)<br>MC 1.21.1 + Sable 2.0.5 | ✅ | LOD载具 |
+| [节气](https://www.curseforge.com/minecraft/mc-mods/ecliptic-seasons)<br>MC 1.21.1 + Ecliptic Seasons 0.15.0-rc-3-1 | ✅ | LOD季节积雪、结冰水体、季节模型与颜色 |
+| [模拟殖民地](https://www.curseforge.com/minecraft/mc-mods/domum-ornamentum)<br>MC 1.21.1 + Domum Ornamentum 1.0.236-snapshot | ✅ | LOD DO模型与材质 |
+| [框架方块](https://www.curseforge.com/minecraft/mc-mods/framedblocks)<br>MC 1.21.1 + FramedBlocks 10.6.1 | ✅ | LOD框架方块与伪装材质 |
+| [小方块](https://www.curseforge.com/minecraft/mc-mods/littletiles)<br>MC 1.21.1 + LittleTiles 1.6.0-pre226 | 🧪 | 仅测试功能，性能较差 |
 
 
 ## 构建
