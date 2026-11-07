@@ -13,8 +13,8 @@ import java.io.DataOutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.ArrayDeque;
+import java.util.Iterator;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.zip.GZIPInputStream;
@@ -31,7 +31,12 @@ final class CreateSnapshotStore {
 
     record Kinetic(long key, int x, int y, int z, int stateHash, byte[] mesh) {}
     record Contraption(UUID id, double x, double y, double z, long signature, boolean train,
-                       Matrix4f local, int light, byte[] mesh) {}
+                       Matrix4f local, int light, byte[] mesh, CreateMeshSource source) {
+        Contraption(UUID id, double x, double y, double z, long signature, boolean train,
+                    Matrix4f local, int light, byte[] mesh) {
+            this(id, x, y, z, signature, train, local, light, mesh, null);
+        }
+    }
 
     private CreateSnapshotStore() {}
 
@@ -59,22 +64,28 @@ final class CreateSnapshotStore {
         });
     }
 
-    static List<Kinetic> loadKinetics(ClientLevel level) {
-        flush();
-        var result = new ArrayList<Kinetic>();
-        readDirectory(directory(level, "kinetic"), in -> {
-            if (in.readInt() != 2) return;
+    static Load<Kinetic> loadKinetics(ClientLevel level) {
+        return new Load<>(directory(level, "kinetic"), in -> {
+            if (in.readInt() != 2) return null;
             long key = in.readLong();
-            result.add(new Kinetic(key, in.readInt(), in.readInt(), in.readInt(), in.readInt(), readMesh(in)));
+            var value = new Kinetic(key, in.readInt(), in.readInt(), in.readInt(), in.readInt(), readMesh(in));
+            return new Loaded<>(value, value.mesh().length + 128L);
         });
-        return result;
     }
 
     static void saveContraption(ClientLevel level, UUID id, double x, double y, double z, long signature,
                                 boolean train, Matrix4f local, int light, byte[] mesh) {
+        saveContraption(level, id, x, y, z, signature, train, local, light, mesh, null);
+    }
+
+    static void saveContraption(ClientLevel level, UUID id, double x, double y, double z, long signature,
+                                boolean train, Matrix4f local, int light, byte[] mesh, CreateMeshSource source) {
         Path file = directory(level, "contraption").resolve(id + ".bin");
+        // 在提交线程捕获姿态，后台不再读取仍会变化的矩阵。
+        float[] matrix = new float[16];
+        local.get(matrix);
         IO.execute(() -> write(file, out -> {
-            out.writeInt(2);
+            out.writeInt(3);
             out.writeLong(id.getMostSignificantBits());
             out.writeLong(id.getLeastSignificantBits());
             out.writeDouble(x);
@@ -82,20 +93,18 @@ final class CreateSnapshotStore {
             out.writeDouble(z);
             out.writeLong(signature);
             out.writeBoolean(train);
-            float[] matrix = new float[16];
-            local.get(matrix);
             for (float value : matrix) out.writeFloat(value);
             out.writeInt(light);
             writeMesh(out, mesh);
+            out.writeBoolean(source != null);
+            if (source != null) source.write(out);
         }));
     }
 
-    static List<Contraption> loadContraptions(ClientLevel level) {
-        flush();
-        var result = new ArrayList<Contraption>();
-        readDirectory(directory(level, "contraption"), in -> {
+    static Load<Contraption> loadContraptions(ClientLevel level) {
+        return new Load<>(directory(level, "contraption"), in -> {
             int version = in.readInt();
-            if (version < 1 || version > 2) return;
+            if (version < 1 || version > 3) return null;
             UUID id = new UUID(in.readLong(), in.readLong());
             double x = in.readDouble(), y = in.readDouble(), z = in.readDouble();
             long signature = in.readLong();
@@ -103,9 +112,18 @@ final class CreateSnapshotStore {
             float[] matrix = new float[16];
             for (int i = 0; i < matrix.length; i++) matrix[i] = in.readFloat();
             int light = version >= 2 ? in.readInt() : net.minecraft.client.renderer.LightTexture.FULL_BRIGHT;
-            result.add(new Contraption(id, x, y, z, signature, train, new Matrix4f().set(matrix), light, readMesh(in)));
+            byte[] mesh = readMesh(in);
+            CreateMeshSource source = null;
+            if (version >= 3) {
+                try {
+                    if (in.readBoolean()) source = CreateMeshSource.read(in);
+                } catch (Exception failure) {
+                    Logger.error("Reading Create mesh source; retaining legacy mesh", failure);
+                }
+            }
+            var value = new Contraption(id, x, y, z, signature, train, new Matrix4f().set(matrix), light, mesh, source);
+            return new Loaded<>(value, mesh.length + 256L + (source == null ? 0 : source.retainedBytes()));
         });
-        return result;
     }
 
     private static Path directory(ClientLevel level, String kind) {
@@ -140,7 +158,140 @@ final class CreateSnapshotStore {
     }
 
     private interface Writer { void write(DataOutputStream out) throws Exception; }
-    private interface Reader { void read(DataInputStream in) throws Exception; }
+    private interface Reader<T> { Loaded<T> read(DataInputStream in) throws Exception; }
+    private record Loaded<T>(T value, long bytes) {}
+
+    // 目录和解压只在存储线程执行；队列满即退出任务，不阻塞后面的保存或 flush。
+    static final class Load<T> implements AutoCloseable {
+        private static final int BATCH_SIZE = 16;
+        private static final long BUFFER_BYTES = 16L * 1024 * 1024;
+        private final Path directory;
+        private final Reader<T> reader;
+        private final ArrayDeque<Loaded<T>> ready = new ArrayDeque<>();
+        private java.nio.file.DirectoryStream<Path> stream;
+        private Iterator<Path> files;
+        private Loaded<T> pending;
+        private long bufferedBytes;
+        private boolean scheduled;
+        private boolean finished;
+        private boolean cancelled;
+
+        private Load(Path directory, Reader<T> reader) {
+            this.directory = directory;
+            this.reader = reader;
+            synchronized (this) {
+                this.schedule();
+            }
+        }
+
+        synchronized T poll() {
+            var value = this.ready.pollFirst();
+            if (value != null) this.bufferedBytes -= value.bytes();
+            this.schedule();
+            return value == null ? null : value.value();
+        }
+
+        synchronized boolean isFinished() {
+            return this.cancelled || this.finished && this.ready.isEmpty();
+        }
+
+        private boolean fits(Loaded<T> value) {
+            // 合法的大记录独占缓冲；最多另保留一条已读但尚未接纳的记录。
+            return this.ready.isEmpty() || this.ready.size() < BATCH_SIZE
+                    && this.bufferedBytes + value.bytes() <= BUFFER_BYTES;
+        }
+
+        private void schedule() {
+            if (this.scheduled || this.cancelled || this.finished || this.ready.size() >= BATCH_SIZE
+                    || this.bufferedBytes >= BUFFER_BYTES || this.pending != null && !this.fits(this.pending)) return;
+            this.scheduled = true;
+            IO.execute(this::readBatch);
+        }
+
+        private void add(Loaded<T> value) {
+            this.ready.addLast(value);
+            this.bufferedBytes += value.bytes();
+        }
+
+        private void readBatch() {
+            try {
+                for (int attempts = 0; attempts < BATCH_SIZE; attempts++) {
+                    synchronized (this) {
+                        if (this.cancelled || this.finished) return;
+                        if (this.pending != null) {
+                            if (!this.fits(this.pending)) return;
+                            this.add(this.pending);
+                            this.pending = null;
+                        }
+                        if (this.ready.size() >= BATCH_SIZE || this.bufferedBytes >= BUFFER_BYTES) return;
+                    }
+                    if (this.stream == null) {
+                        if (!Files.isDirectory(this.directory)) {
+                            synchronized (this) { this.finished = true; }
+                            return;
+                        }
+                        this.stream = Files.newDirectoryStream(this.directory);
+                        this.files = this.stream.iterator();
+                    }
+                    if (!this.files.hasNext()) {
+                        synchronized (this) { this.finished = true; }
+                        return;
+                    }
+                    Path file = this.files.next();
+                    if (!file.getFileName().toString().endsWith(".bin")) continue;
+                    Loaded<T> value;
+                    try (var in = new DataInputStream(new BufferedInputStream(new GZIPInputStream(Files.newInputStream(file))))) {
+                        value = in.readInt() == MAGIC ? this.reader.read(in) : null;
+                    } catch (Throwable failure) {
+                        Logger.error("Reading Create LOD snapshot " + file.getFileName(), failure);
+                        continue;
+                    }
+                    if (value == null) continue;
+                    synchronized (this) {
+                        if (this.cancelled) return;
+                        if (this.fits(value)) this.add(value);
+                        else {
+                            this.pending = value;
+                            return;
+                        }
+                    }
+                }
+            } catch (Throwable failure) {
+                Logger.error("Listing stored Create LOD snapshots", failure);
+                synchronized (this) { this.finished = true; }
+            } finally {
+                boolean close;
+                synchronized (this) {
+                    this.scheduled = false;
+                    close = this.cancelled || this.finished;
+                    if (!close) this.schedule();
+                }
+                if (close && this.stream != null) {
+                    try {
+                        this.stream.close();
+                    } catch (Exception failure) {
+                        Logger.error("Closing stored Create LOD snapshots", failure);
+                    }
+                    this.stream = null;
+                    this.files = null;
+                }
+            }
+        }
+
+        @Override
+        public synchronized void close() {
+            if (this.cancelled) return;
+            this.cancelled = true;
+            this.ready.clear();
+            this.pending = null;
+            this.bufferedBytes = 0;
+            // 目录句柄始终由同一存储线程关闭；调用者无需等待读盘。
+            if (!this.scheduled && !this.finished) {
+                this.scheduled = true;
+                IO.execute(this::readBatch);
+            }
+        }
+    }
 
     private static void write(Path file, Writer writer) {
         try {
@@ -160,18 +311,4 @@ final class CreateSnapshotStore {
         }
     }
 
-    private static void readDirectory(Path directory, Reader reader) {
-        if (!Files.isDirectory(directory)) return;
-        try (var files = Files.list(directory)) {
-            files.filter(path -> path.getFileName().toString().endsWith(".bin")).forEach(path -> {
-                try (var in = new DataInputStream(new BufferedInputStream(new GZIPInputStream(Files.newInputStream(path))))) {
-                    if (in.readInt() == MAGIC) reader.read(in);
-                } catch (Throwable t) {
-                    Logger.error("Reading Create LOD snapshot " + path.getFileName(), t);
-                }
-            });
-        } catch (Throwable t) {
-            Logger.error("Listing stored Create LOD snapshots", t);
-        }
-    }
 }

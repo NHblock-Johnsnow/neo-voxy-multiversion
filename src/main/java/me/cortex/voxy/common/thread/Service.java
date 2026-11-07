@@ -1,5 +1,6 @@
 package me.cortex.voxy.common.thread;
 
+import me.cortex.voxy.common.util.ExceptionCleanup;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.Pair;
 
@@ -37,17 +38,14 @@ public class Service {
     }
 
     boolean runJob() {
-        if (this.isStopping||!this.isLive) {
-            return false;
+        if (this.isStopping || !this.isLive || !this.tasks.tryAcquire()) return false;
+        try {
+            if (!this.executor.run()) throw new IllegalStateException("Executor failed to run");
+            return true;
+        } finally {
+            // 已取得的任务许可，无论执行结果如何都要归还全局计数。
+            this.sm.remJobs(1);
         }
-        if (!this.tasks.tryAcquire()) {
-            //Failed to get the job, probably due to a race condition
-            return false;
-        }
-        if (!this.executor.run()) {//Run the job
-            throw new IllegalStateException("Executor failed to run");
-        }
-        return true;
     }
 
     public boolean isLive() {
@@ -70,15 +68,15 @@ public class Service {
     }
 
     public int shutdown() {
-        if (this.isStopping) {
-            throw new IllegalStateException("Service not live");
-        }
-        this.isStopping = true;//First mark the service as stopping
-        this.sm.removeService(this);//Remove the service this is so that new jobs are never executed
-        this.executor.shutdown();//Await shutdown of all running jobs
-        int remaining = this.tasks.drainPermits();//Drain the remaining tasks to 0
-        this.isLive = false;//Mark the service as dead
-        this.sm.remJobs(remaining);
+        if (this.isStopping) throw new IllegalStateException("Service not live");
+        this.isStopping = true;
+        var cleanup = new ExceptionCleanup(null);
+        cleanup.run(() -> this.sm.removeService(this));
+        cleanup.run(this.executor::shutdown);
+        int remaining = this.tasks.drainPermits();
+        this.isLive = false;
+        cleanup.run(() -> this.sm.remJobs(remaining));
+        cleanup.rethrow();
         return remaining;
     }
 

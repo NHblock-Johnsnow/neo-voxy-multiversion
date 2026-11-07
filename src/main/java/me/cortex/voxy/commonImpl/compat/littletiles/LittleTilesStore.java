@@ -19,7 +19,7 @@ import java.util.List;
 
 public final class LittleTilesStore {
     public static final String TABLE = "littletiles_sections";
-    private static final byte FORMAT = 1;
+    private static final byte FORMAT = 2;
     private static final int MAX_CELLS = 1 << 21;
 
     private LittleTilesStore() {}
@@ -67,6 +67,7 @@ public final class LittleTilesStore {
     }
 
     private static byte[] encode(LittleTilesCompat.SectionSnapshot snapshot) throws Exception {
+        boolean wide = snapshot.materials().size() > 65536;
         var root = new CompoundTag();
         var states = new ListTag();
         for (var material : snapshot.materials()) {
@@ -80,9 +81,10 @@ public final class LittleTilesStore {
         var nbtBytes = new ByteArrayOutputStream();
         NbtIo.writeCompressed(root, nbtBytes);
 
-        var bytes = new ByteArrayOutputStream(snapshot.cells().size() * 7 + nbtBytes.size() + 32);
+        var bytes = new ByteArrayOutputStream(snapshot.cells().size() * (wide ? 9 : 7) + nbtBytes.size() + 32);
         var out = new DataOutputStream(bytes);
-        out.writeByte(FORMAT);
+        // 小调色板继续写旧格式；只有超过 u16 容量时使用四字节索引。
+        out.writeByte(wide ? FORMAT : 1);
         out.writeInt(snapshot.sx());
         out.writeInt(snapshot.sy());
         out.writeInt(snapshot.sz());
@@ -90,16 +92,20 @@ public final class LittleTilesStore {
         out.write(nbtBytes.toByteArray());
         out.writeInt(snapshot.cells().size());
         for (var cell : snapshot.cells()) {
+            if (cell.material() < 0 || cell.material() >= snapshot.materials().size()) {
+                throw new IllegalArgumentException("LittleTiles material index out of range");
+            }
             out.writeInt(cell.coordinate());
-            out.writeShort(cell.material());
+            if (wide) out.writeInt(cell.material());
+            else out.writeShort(cell.material());
             out.writeByte(cell.light());
         }
         out.flush();
         return bytes.toByteArray();
     }
 
-    private static LittleTilesCompat.SectionSnapshot decode(byte[] bytes) {
-        if (bytes == null || bytes.length < 18 || bytes[0] != FORMAT) return null;
+    public static LittleTilesCompat.SectionSnapshot decode(byte[] bytes) {
+        if (bytes == null || bytes.length < 18 || bytes[0] < 1 || bytes[0] > FORMAT) return null;
         try (var in = new DataInputStream(new ByteArrayInputStream(bytes, 1, bytes.length - 1))) {
             int sx = in.readInt(), sy = in.readInt(), sz = in.readInt();
             int nbtLength = in.readInt();
@@ -120,9 +126,9 @@ public final class LittleTilesStore {
             var cells = new ArrayList<LittleTilesCompat.Cell>(count);
             for (int i = 0; i < count; i++) {
                 int coordinate = in.readInt();
-                int material = in.readUnsignedShort();
+                int material = bytes[0] >= 2 ? in.readInt() : in.readUnsignedShort();
                 int light = in.readUnsignedByte();
-                if (material >= materials.size() || (coordinate & ~0x1FFFFF) != 0) return null;
+                if (material < 0 || material >= materials.size() || (coordinate & ~0x1FFFFF) != 0) return null;
                 cells.add(new LittleTilesCompat.Cell(coordinate, material, light));
             }
             long[] holders = new long[64];

@@ -5,6 +5,7 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectMaps;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongArrayList;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
+import it.unimi.dsi.fastutil.longs.LongLinkedOpenHashSet;
 import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.common.world.WorldSection;
 import net.minecraft.core.BlockPos;
@@ -19,11 +20,17 @@ public final class BeaconBeamTracker {
     //so a base edge re-ingested from the neighbouring column still lands on it.
     private static volatile Long2ObjectMap<long[]> columnToBeacons = Long2ObjectMaps.emptyMap();
 
-    private static final LongOpenHashSet DIRTY = new LongOpenHashSet();
+    private static final LongLinkedOpenHashSet DIRTY = new LongLinkedOpenHashSet();
     private static final LongOpenHashSet REMOVED = new LongOpenHashSet();
     private static final Object MUTATION_LOCK = new Object();
+    private static Object bindingToken;
+    private static volatile java.lang.ref.WeakReference<WorldEngine> boundEngine = new java.lang.ref.WeakReference<>(null);
 
     private BeaconBeamTracker() {
+    }
+
+    public static boolean isBound(WorldEngine engine) {
+        return engine != null && boundEngine.get() == engine;
     }
 
     public static boolean isTracked(long pos) {
@@ -42,17 +49,12 @@ public final class BeaconBeamTracker {
     //Rebuilds the column map from the engine's index and hooks its membership diff. Render thread,
     //once per engine.
     public static void bind(WorldEngine engine) {
-        synchronized (MUTATION_LOCK) {
-            DIRTY.clear();
-            REMOVED.clear();
-            var fresh = new Long2ObjectOpenHashMap<long[]>();
-            engine.getBeaconIndex().forEach((x, y, z) -> registerColumns(fresh, x, y, z));
-            columnToBeacons = fresh;
-        }
-        engine.getBeaconIndex().setListener(new me.cortex.voxy.common.world.other.BeaconIndex.ChangeListener() {
+        Object token = new Object();
+        engine.getBeaconIndex().initializeListener(new me.cortex.voxy.common.world.other.BeaconIndex.ChangeListener() {
             @Override
             public void onBeaconAdded(int x, int y, int z) {
                 synchronized (MUTATION_LOCK) {
+                    if (bindingToken != token) return;
                     var next = new Long2ObjectOpenHashMap<>(columnToBeacons);
                     registerColumns(next, x, y, z);
                     columnToBeacons = next;
@@ -63,6 +65,7 @@ public final class BeaconBeamTracker {
             @Override
             public void onBeaconRemoved(int x, int y, int z) {
                 synchronized (MUTATION_LOCK) {
+                    if (bindingToken != token) return;
                     var next = new Long2ObjectOpenHashMap<>(columnToBeacons);
                     unregisterColumns(next, x, y, z);
                     columnToBeacons = next;
@@ -70,6 +73,16 @@ public final class BeaconBeamTracker {
                     DIRTY.remove(pos);
                     REMOVED.add(pos);
                 }
+            }
+        }, () -> {
+            synchronized (MUTATION_LOCK) {
+                DIRTY.clear();
+                REMOVED.clear();
+                var fresh = new Long2ObjectOpenHashMap<long[]>();
+                engine.getBeaconIndex().forEach((x, y, z) -> registerColumns(fresh, x, y, z));
+                columnToBeacons = fresh;
+                bindingToken = token;
+                boundEngine = new java.lang.ref.WeakReference<>(engine);
             }
         });
     }
@@ -79,6 +92,9 @@ public final class BeaconBeamTracker {
             engine.getBeaconIndex().setListener(null);
         }
         synchronized (MUTATION_LOCK) {
+            if (engine != null && boundEngine.get() != engine) return;
+            bindingToken = null;
+            boundEngine = new java.lang.ref.WeakReference<>(null);
             DIRTY.clear();
             REMOVED.clear();
             columnToBeacons = Long2ObjectMaps.emptyMap();
@@ -87,8 +103,8 @@ public final class BeaconBeamTracker {
 
     //The ingest-worker filter. One volatile read and one probe for the overwhelmingly common case of a
     //section nowhere near a beacon.
-    public static void onSectionDirty(WorldSection section, int flags) {
-        if (section.lvl != 0 || (flags & WorldEngine.UPDATE_TYPE_BLOCK_BIT) == 0) {
+    public static void onSectionDirty(WorldEngine engine, WorldSection section, int flags) {
+        if (!isBound(engine) || section.lvl != 0 || (flags & WorldEngine.UPDATE_TYPE_BLOCK_BIT) == 0) {
             return;
         }
         long[] beacons = columnToBeacons.get(columnKey(section.x, section.z));
@@ -102,25 +118,24 @@ public final class BeaconBeamTracker {
             int maxSection = (by + BeaconBeamSolver.MAX_SCAN_HEIGHT) >> 5;
             if (section.y >= minSection && section.y <= maxSection) {
                 synchronized (MUTATION_LOCK) {
-                    DIRTY.add(pos);
+                    if (isBound(engine) && isTracked(pos)) DIRTY.add(pos);
                 }
             }
         }
     }
 
     //Queued from anywhere a beam needs a re-solve without a voxel change (first sight, mapper retry)
-    public static void queueDirty(long pos) {
+    public static void queueDirty(WorldEngine engine, long pos) {
         synchronized (MUTATION_LOCK) {
-            DIRTY.add(pos);
+            if (isBound(engine)) DIRTY.add(pos);
         }
     }
 
-    /** Moves the pending sets into the caller's lists. Render thread. */
-    public static void drain(LongArrayList dirtyOut, LongArrayList removedOut) {
+    /** 只取本帧能处理的 dirty，剩余项保留 FIFO 顺序，避免全取再放回。 */
+    public static void drain(LongArrayList dirtyOut, LongArrayList removedOut, int maxDirty) {
         synchronized (MUTATION_LOCK) {
-            if (!DIRTY.isEmpty()) {
-                dirtyOut.addAll(DIRTY);
-                DIRTY.clear();
+            for (int i = 0; i < maxDirty && !DIRTY.isEmpty(); i++) {
+                dirtyOut.add(DIRTY.removeFirstLong());
             }
             if (!REMOVED.isEmpty()) {
                 removedOut.addAll(REMOVED);

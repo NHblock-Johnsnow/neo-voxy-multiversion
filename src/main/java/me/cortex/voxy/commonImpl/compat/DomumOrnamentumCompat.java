@@ -5,8 +5,6 @@ import me.cortex.voxy.common.config.section.SectionStorage;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
-import net.minecraft.nbt.ListTag;
-import net.minecraft.nbt.Tag;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -21,13 +19,9 @@ import net.neoforged.neoforge.client.model.data.ModelProperty;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.HexFormat;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -36,7 +30,7 @@ import java.util.function.Predicate;
 public final class DomumOrnamentumCompat {
     public static final String DISGUISE_TABLE = "disguise_domum";
     public static final String VARIANT_TYPE = "domum_ornamentum";
-    private static final BlockEntity[] NO_BLOCK_ENTITIES = new BlockEntity[0];
+    private static final CapturedBlock[] NO_BLOCK_ENTITIES = new CapturedBlock[0];
 
     private static final boolean LOADED = ModList.get().isLoaded(VARIANT_TYPE);
     private static final String PACKAGE_PREFIX = "com.ldtteam.domumornamentum";
@@ -47,7 +41,7 @@ public final class DomumOrnamentumCompat {
     private static final ThreadLocal<SectionMappings> SECTION_MAPPINGS =
             ThreadLocal.withInitial(SectionMappings::new);
     private static final Map<Mapper, Map<Integer, BakePlan>> BAKE_PLANS = new ConcurrentHashMap<>();
-    private static final Map<Object, VariantDescriptor> DESCRIPTORS = new ConcurrentHashMap<>();
+    private static final Map<String, VariantDescriptor> DESCRIPTORS = new ConcurrentHashMap<>();
 
     //Walk the superclass chain rather than testing the concrete class alone: an addon subclassing a Domum
     //block entity lands outside the package but still carries the material data we are after.
@@ -149,6 +143,8 @@ public final class DomumOrnamentumCompat {
     private record VariantDescriptor(String key, CompoundTag data) {
     }
 
+    public record CapturedBlock(BlockPos pos, String materialKey, CompoundTag materialData) {}
+
     public static boolean isLoaded() {
         return LOADED;
     }
@@ -163,67 +159,80 @@ public final class DomumOrnamentumCompat {
 
     public static final class SectionBlockEntities {
         private static final SectionBlockEntities EMPTY = new SectionBlockEntities(Map.of());
-        private final Map<Integer, BlockEntity[]> sections;
+        private final Map<Integer, CapturedBlock[]> sections;
 
-        private SectionBlockEntities(Map<Integer, BlockEntity[]> sections) {
+        private SectionBlockEntities(Map<Integer, CapturedBlock[]> sections) {
             this.sections = sections;
         }
 
-        public BlockEntity[] forSection(int sectionY) {
+        public CapturedBlock[] forSection(int sectionY) {
             return this.sections.getOrDefault(sectionY, NO_BLOCK_ENTITIES);
         }
     }
 
-    /**
-     * Captures and groups Domum block entities once on the caller thread. Ingest workers receive
-     * immutable arrays for their own section instead of repeatedly traversing the live chunk map.
-     */
+    /** 在调用线程冻结材质；后台只读取私有 NBT 和位置。 */
     public static SectionBlockEntities captureBlockEntitiesBySection(LevelChunk chunk) {
         if (!LOADED || chunk == null || chunk.getBlockEntities().isEmpty()) {
             return SectionBlockEntities.EMPTY;
         }
 
-        Map<Integer, ArrayList<BlockEntity>> buckets = null;
+        Map<Integer, ArrayList<CapturedBlock>> buckets = null;
         for (BlockEntity blockEntity : chunk.getBlockEntities().values()) {
             if (blockEntity == null || !DOMUM_BLOCK_ENTITIES.get(blockEntity.getClass())) {
                 continue;
             }
+            CapturedBlock captured = capture(blockEntity);
+            if (captured == null) continue;
             if (buckets == null) {
                 buckets = new HashMap<>();
             }
-            buckets.computeIfAbsent(blockEntity.getBlockPos().getY() >> 4, ignored -> new ArrayList<>())
-                    .add(blockEntity);
+            buckets.computeIfAbsent(captured.pos().getY() >> 4, ignored -> new ArrayList<>())
+                    .add(captured);
         }
         if (buckets == null) {
             return SectionBlockEntities.EMPTY;
         }
 
-        Map<Integer, BlockEntity[]> sections = new HashMap<>(buckets.size());
+        Map<Integer, CapturedBlock[]> sections = new HashMap<>(buckets.size());
         buckets.forEach((sectionY, entities) ->
-                sections.put(sectionY, entities.toArray(BlockEntity[]::new)));
+                sections.put(sectionY, entities.toArray(CapturedBlock[]::new)));
         return new SectionBlockEntities(Map.copyOf(sections));
     }
 
-    public static BlockEntity[] captureBlockEntities(LevelChunk chunk, LevelChunkSection section) {
+    public static CapturedBlock[] captureBlockEntities(LevelChunk chunk, LevelChunkSection section) {
         if (!LOADED || chunk == null || section == null
                 || !section.maybeHas(DOMUM_STATE_PREDICATE)
                 || chunk.getBlockEntities().isEmpty()) {
             return NO_BLOCK_ENTITIES;
         }
 
-        ArrayList<BlockEntity> result = null;
+        ArrayList<CapturedBlock> result = null;
         for (BlockEntity blockEntity : chunk.getBlockEntities().values()) {
             if (blockEntity != null && DOMUM_BLOCK_ENTITIES.get(blockEntity.getClass())) {
+                CapturedBlock captured = capture(blockEntity);
+                if (captured == null) continue;
                 if (result == null) {
                     result = new ArrayList<>();
                 }
-                result.add(blockEntity);
+                result.add(captured);
             }
         }
-        return result == null ? NO_BLOCK_ENTITIES : result.toArray(BlockEntity[]::new);
+        return result == null ? NO_BLOCK_ENTITIES : result.toArray(CapturedBlock[]::new);
     }
 
-    public static void beginSection(Mapper mapper, SectionStorage storage, BlockEntity[] blockEntities,
+    private static CapturedBlock capture(BlockEntity blockEntity) {
+        try {
+            Object textureData = extractTextureData(blockEntity);
+            if (textureData == null) textureData = extractTextureData(blockEntity.getModelData());
+            VariantDescriptor descriptor = textureData == null ? null : createDescriptor(textureData);
+            return descriptor == null ? null : new CapturedBlock(blockEntity.getBlockPos().immutable(),
+                    descriptor.key(), descriptor.data().copy());
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    public static void beginSection(Mapper mapper, SectionStorage storage, CapturedBlock[] blockEntities,
                                     LevelChunkSection section, int sectionX, int sectionY, int sectionZ) {
         if (!LOADED) {
             return;
@@ -233,15 +242,25 @@ public final class DomumOrnamentumCompat {
         if (mapper == null || section == null) {
             return;
         }
-        if (blockEntities == null || blockEntities.length == 0) {
-            if (section.maybeHas(DOMUM_STATE_PREDICATE)) {
-                int restored = DisguiseStore.load(storage, DISGUISE_TABLE,
-                        sectionX, sectionY, sectionZ, mappings::put);
-                mappings.active = restored != 0;
+        if (!section.maybeHas(DOMUM_STATE_PREDICATE)) {
+            if (DisguiseStore.clearIfPresent(storage, DISGUISE_TABLE, sectionX, sectionY, sectionZ)) {
+                SectionListener listener = sectionListener;
+                if (listener != null) listener.changed(storage, sectionX, sectionY, sectionZ);
             }
             return;
         }
-        if (!section.maybeHas(DOMUM_STATE_PREDICATE)) {
+        if (blockEntities == null || blockEntities.length == 0) {
+            // 调色板可能保留已删除状态；只核对历史记录中的坐标。
+            int restored = DisguiseStore.load(storage, DISGUISE_TABLE, sectionX, sectionY, sectionZ,
+                    (index, id) -> {
+                        if (isDomumState(section.getBlockState(index & 15, index >>> 8, (index >>> 4) & 15))) {
+                            mappings.put(index, id);
+                        }
+                    });
+            mappings.active = mappings.touchedCount != 0;
+            if (restored != mappings.touchedCount) {
+                storeMappings(storage, mappings, sectionX, sectionY, sectionZ);
+            }
             return;
         }
 
@@ -249,34 +268,20 @@ public final class DomumOrnamentumCompat {
         int maxY = minY + 15;
         Map<Integer, BakePlan> plans = null;
 
-        for (BlockEntity blockEntity : blockEntities) {
-            BlockPos pos = blockEntity.getBlockPos();
+        for (CapturedBlock captured : blockEntities) {
+            BlockPos pos = captured.pos();
             if (pos.getY() < minY || pos.getY() > maxY) {
                 continue;
             }
 
             try {
-                Object textureData = extractTextureData(blockEntity);
-                ModelData modelData = ModelData.EMPTY;
-                if (textureData == null) {
-                    modelData = blockEntity.getModelData();
-                    textureData = extractTextureData(modelData);
-                }
-                if (textureData == null) {
-                    continue;
-                }
-
-                VariantDescriptor descriptor = DESCRIPTORS.computeIfAbsent(textureData,
-                        DomumOrnamentumCompat::createDescriptor);
-                if (descriptor == null) {
-                    continue;
-                }
+                VariantDescriptor descriptor = new VariantDescriptor(captured.materialKey(), captured.materialData());
 
                 int lx = pos.getX() & 15;
                 int ly = pos.getY() & 15;
                 int lz = pos.getZ() & 15;
                 BlockState state = section.getBlockState(lx, ly, lz);
-                if (state == null || state.isAir()) {
+                if (!isDomumState(state)) {
                     continue;
                 }
 
@@ -286,8 +291,9 @@ public final class DomumOrnamentumCompat {
                     plans = plansFor(mapper);
                 }
                 if (plans.get(mappedId) == null) {
-                    ModelData resolvedModelData = modelData == ModelData.EMPTY
-                            ? createModelData(textureData) : modelData;
+                    Object textureData = deserializeTextureData(descriptor.data());
+                    if (textureData == null) continue;
+                    ModelData resolvedModelData = createModelData(textureData);
                     plans.putIfAbsent(mappedId,
                             createBakePlan(state, resolvedModelData, descriptor, textureData));
                 }
@@ -297,6 +303,11 @@ public final class DomumOrnamentumCompat {
             }
         }
         mappings.active = mappings.touchedCount != 0;
+        storeMappings(storage, mappings, sectionX, sectionY, sectionZ);
+    }
+
+    private static void storeMappings(SectionStorage storage, SectionMappings mappings,
+                                      int sectionX, int sectionY, int sectionZ) {
         if (storage != null) {
             if (mappings.touchedCount == 0) {
                 DisguiseStore.clear(storage, DISGUISE_TABLE, sectionX, sectionY, sectionZ);
@@ -357,8 +368,7 @@ public final class DomumOrnamentumCompat {
             if (textureData == null) {
                 return;
             }
-            VariantDescriptor descriptor = DESCRIPTORS.computeIfAbsent(textureData,
-                    DomumOrnamentumCompat::createDescriptor);
+            VariantDescriptor descriptor = createDescriptor(textureData);
             if (descriptor == null) {
                 return;
             }
@@ -398,7 +408,9 @@ public final class DomumOrnamentumCompat {
             if (data == null || data.isEmpty()) {
                 return null;
             }
-            return new VariantDescriptor(canonicalKey(data), data.copy());
+            CompoundTag snapshot = data.copy();
+            String key = NbtVariantKey.of(snapshot);
+            return DESCRIPTORS.computeIfAbsent(key, ignored -> new VariantDescriptor(key, snapshot));
         } catch (Throwable ignored) {
             return null;
         }
@@ -551,48 +563,6 @@ public final class DomumOrnamentumCompat {
         }
         String path = id.getPath();
         return path.contains("shingle") && !path.contains("slab");
-    }
-
-    private static String canonicalKey(CompoundTag data) {
-        StringBuilder canonical = new StringBuilder(128);
-        appendCanonical(data, canonical);
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest(canonical.toString().getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest);
-        } catch (NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException("SHA-256 is unavailable", impossible);
-        }
-    }
-
-    private static void appendCanonical(Tag tag, StringBuilder output) {
-        output.append(tag.getId()).append(':');
-        if (tag instanceof CompoundTag compound) {
-            var keys = new ArrayList<>(compound.getAllKeys());
-            keys.sort(String::compareTo);
-            output.append('{');
-            for (String key : keys) {
-                output.append(key.length()).append(':').append(key).append('=');
-                Tag value = compound.get(key);
-                if (value != null) {
-                    appendCanonical(value, output);
-                }
-                output.append(';');
-            }
-            output.append('}');
-            return;
-        }
-        if (tag instanceof ListTag list) {
-            output.append('[');
-            for (int index = 0; index < list.size(); index++) {
-                appendCanonical(list.get(index), output);
-                output.append(';');
-            }
-            output.append(']');
-            return;
-        }
-        String value = tag.toString();
-        output.append(value.length()).append(':').append(value);
     }
 
     private static Map<Integer, BakePlan> plansFor(Mapper mapper) {

@@ -263,7 +263,8 @@ public class VoxyNeoForgeConfig {
     }
 
     /** 将 VoxyConfig 的当前值回写到 NeoForge 配置，以保持 Mods 菜单一致。 */
-    private static void syncFromVoxyConfig() {
+    public static void syncFromVoxyConfig() {
+        if (!SPEC.isLoaded() || VoxyConfig.CONFIG == null) return;
         VoxyConfig.CONFIG.sanitize();
         ENABLED.set(VoxyConfig.CONFIG.enabled);
         ENABLE_RENDERING.set(VoxyConfig.CONFIG.enableRendering);

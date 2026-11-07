@@ -76,6 +76,7 @@ public class PrintfInjector implements IShaderProcessor {
    }
 
    public String transformInject(String src) {
+      String original = src;
       if (!src.contains("printf")) {
          return src;
       } else {
@@ -100,7 +101,7 @@ public class PrintfInjector implements IShaderProcessor {
             if (nextCall == -1) {
                result.append(src, pos, src.length());
                if (!usedPrintf) {
-                  return src;
+                  return original;
                }
 
                return result.toString();

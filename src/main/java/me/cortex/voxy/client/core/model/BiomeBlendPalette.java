@@ -12,12 +12,37 @@ import java.util.concurrent.atomic.AtomicInteger;
 // can carry, so blends live in a palette addressed through the quad's unused bits.
 public final class BiomeBlendPalette {
     // Must match the base used by quad_util.glsl.
-    public static final int PALETTE_BASE = 57344;
-    public static final int PALETTE_CAPACITY = 65536 - PALETTE_BASE;
+    public static final int PALETTE_BASE = 0;
+    public static final int PALETTE_CAPACITY = 8192;
+    // 流体将四个形状位保留给高度，颜色只使用独立的 9 位索引。
+    public static final int FLUID_PALETTE_BASE = PALETTE_CAPACITY;
+    public static final int FLUID_PALETTE_CAPACITY = 512;
+    public static final int NORMAL_COLOUR_BASE = FLUID_PALETTE_BASE + FLUID_PALETTE_CAPACITY;
+    private final ConcurrentHashMap<Integer, Integer> fluidIndices = new ConcurrentHashMap<>();
+    private final AtomicInteger nextFluidIndex = new AtomicInteger();
+    private volatile boolean fluidFullWarned;
+
+    public int indexForFluid(int abgr) {
+        if (this.disabled) return -1;
+        return this.fluidIndices.computeIfAbsent(abgr & 0xF8F8F8, ignored -> {
+            int index = this.nextFluidIndex.getAndIncrement();
+            if (index >= FLUID_PALETTE_CAPACITY) {
+                if (!this.fluidFullWarned) {
+                    this.fluidFullWarned = true;
+                    me.cortex.voxy.common.Logger.warn("Fluid blend palette full (512 entries); further colours keep biome edges");
+                }
+                return -1;
+            }
+            this.pendingUploads.add(new int[]{FLUID_PALETTE_BASE + index, abgr | 0xFF000000});
+            return index;
+        });
+    }
+
 
     public record Snapshot(int[] colours, int[] rowBaseByModelId, int stride) {
         static final Snapshot EMPTY = new Snapshot(new int[0], new int[0], 0);
 
+        // 返回 RGB，使有效的纯白色与缺失值 -1 分开。
         public int colourOf(int modelId, int biomeId) {
             if (modelId < 0 || modelId >= this.rowBaseByModelId.length
                     || biomeId < 0 || biomeId >= this.stride) {
@@ -28,7 +53,7 @@ public final class BiomeBlendPalette {
                 return -1;
             }
             int idx = base + biomeId;
-            return idx < this.colours.length ? this.colours[idx] : -1;
+            return idx < this.colours.length ? this.colours[idx] & 0xFFFFFF : -1;
         }
     }
 

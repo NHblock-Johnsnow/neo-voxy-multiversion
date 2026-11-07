@@ -41,24 +41,26 @@ public final class DistantBlockShader {
         }
         if (!patchFailed) {
             try {
+                // 稳定管线直接复用，避免每次绘制重复读源码和生成补丁。
+                Shader selected = uniformLight ? patchedUniformShader : patchedShader;
+                if (selected != null) return selected;
                 String fragment = pipeline.patchOpaqueShader(null,
                         ShaderLoader.parse("voxy:compat/distant_block.frag"));
                 if (fragment != null) {
-                    Shader selected = uniformLight ? patchedUniformShader : patchedShader;
-                    if (selected == null) {
-                        String vertex = ShaderLoader.parse("voxy:compat/distant_block.vert");
-                        String taa = pipeline.taaFunction("distantTaaShift");
-                        vertex += "\n" + (taa != null ? taa
-                                : "vec2 distantTaaShift() { return vec2(0.0); }");
-                        selected = Shader.make().define("PATCHED_SHADER").defineIf("UNIFORM_LIGHT", uniformLight)
-                                .addSource(ShaderType.VERTEX, vertex)
-                                .addSource(ShaderType.FRAGMENT, fragment)
-                                .compile().name(uniformLight ? "distant_block_patched_uniform" : "distant_block_patched");
-                        if (uniformLight) patchedUniformShader = selected;
-                        else patchedShader = selected;
-                    }
+                    String vertex = ShaderLoader.parse("voxy:compat/distant_block.vert");
+                    String taa = pipeline.taaFunction("distantTaaShift");
+                    vertex += "\n" + (taa != null ? taa
+                            : "vec2 distantTaaShift() { return vec2(0.0); }");
+                    selected = Shader.make().define("PATCHED_SHADER").defineIf("UNIFORM_LIGHT", uniformLight)
+                            .addSource(ShaderType.VERTEX, vertex)
+                            .addSource(ShaderType.FRAGMENT, fragment)
+                            .compile().name(uniformLight ? "distant_block_patched_uniform" : "distant_block_patched");
+                    if (uniformLight) patchedUniformShader = selected;
+                    else patchedShader = selected;
                     return selected;
                 }
+                // 不支持补丁的结果也缓存，切换管线时重置。
+                patchFailed = true;
             } catch (Throwable error) {
                 patchFailed = true;
                 Logger.error("Failed to compile shader-pack patched 1.20.1 distant block shader", error);

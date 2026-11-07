@@ -81,12 +81,16 @@ public final class ReuseVertexConsumer implements VertexConsumer {
 
     @Override
     public ReuseVertexConsumer color(int red, int green, int blue, int alpha) {
-        return this.color((alpha << 24) | (blue << 16) | (green << 8) | red);
+        return this.writeAbgr(((alpha & 0xFF) << 24) | ((blue & 0xFF) << 16)
+                | ((green & 0xFF) << 8) | (red & 0xFF));
     }
 
     @Override
     public ReuseVertexConsumer color(int i) {
-        i = normalizeAbgr(i);
+        return this.writeAbgr((i & 0xFF00FF00) | ((i >>> 16) & 0xFF) | ((i & 0xFF) << 16));
+    }
+
+    private ReuseVertexConsumer writeAbgr(int i) {
         if (this.vertexAlphaOnly) {
             i = (i & 0xFF000000) | 0x00FFFFFF;
         }
@@ -169,11 +173,17 @@ public final class ReuseVertexConsumer implements VertexConsumer {
             boolean transparent = false;
             int width = contents.width();
             int height = contents.height();
-            for (int y = 0; y < height && !transparent; y++) {
-                for (int x = 0; x < width; x++) {
-                    if (contents.isTransparent(0, x, y)) {
-                        transparent = true;
-                        break;
+            try (var frames = contents.getUniqueFrames()) {
+                var iterator = frames.iterator();
+                while (iterator.hasNext() && !transparent) {
+                    int frame = iterator.nextInt();
+                    for (int y = 0; y < height && !transparent; y++) {
+                        for (int x = 0; x < width; x++) {
+                            if (contents.isTransparent(frame, x, y)) {
+                                transparent = true;
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -193,28 +203,12 @@ public final class ReuseVertexConsumer implements VertexConsumer {
             // look at FaceBakery
             int j = i * 8;
             this.vertex(Float.intBitsToFloat(vertices[j]), Float.intBitsToFloat(vertices[j + 1]), Float.intBitsToFloat(vertices[j + 2]));
-            this.color(normalizeAbgr(vertices[j + 3]));
+            this.writeAbgr(vertices[j + 3]);
             this.uv(Float.intBitsToFloat(vertices[j + 4]), Float.intBitsToFloat(vertices[j + 5]));
 
             this.meta(metadata|this.globalOrMetadata);
         }
         return this;
-    }
-
-    /**
-     * Several Forge baked-model implementations leave the vertex alpha byte at
-     * zero when no vertex colour is intended. Vanilla treats that packed colour
-     * as opaque white; multiplying it literally would erase the sampled sprite
-     * alpha and corrupt the whole LOD face.
-     */
-    private static int normalizeAbgr(int colour) {
-        if (colour == -1) {
-            return 0xFFFFFFFF;
-        }
-        if ((colour & 0xFF000000) == 0) {
-            colour |= 0xFF000000;
-        }
-        return colour;
     }
 
     private void ensureCanPut() {

@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core;
 
+import me.cortex.voxy.common.util.ExceptionCleanup;
+
 import java.util.List;
 import java.util.function.BooleanSupplier;
 import me.cortex.voxy.client.RenderStatistics;
@@ -34,8 +36,8 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
    private final HierarchicalOcclusionTraverser traversal;
    protected AbstractSectionRenderer<?, ?> sectionRenderer;
    private final FullscreenBlit depthStencilSetup;
-   public final DepthFramebuffer fb = new DepthFramebuffer(35056);
-   private final GlFramebuffer scratchFramebuffer = new GlFramebuffer();
+   public final DepthFramebuffer fb;
+   private final GlFramebuffer scratchFramebuffer;
    protected final boolean deferTranslucency;
    private static final int DEPTH_SAMPLER = GL42.glGenSamplers();
    private static final long SCRATCH = MemoryUtil.nmemAlloc(64L);
@@ -55,8 +57,15 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
       this.nodeCleaner = nodeCleaner;
       this.traversal = traversal;
       this.deferTranslucency = deferTranslucency;
-      this.depthStencilSetup = new FullscreenBlit(properties, "voxy:post/fullscreen2.vert", "voxy:post/setup_stencil_depth.frag");
-   }
+      try {
+            this.fb = new DepthFramebuffer(35056);
+            this.scratchFramebuffer = new GlFramebuffer();
+            this.depthStencilSetup = new FullscreenBlit(properties, "voxy:post/fullscreen2.vert", "voxy:post/setup_stencil_depth.frag");
+        } catch (RuntimeException | Error failure) {
+            this.releaseBaseResources(new ExceptionCleanup(failure));
+            throw failure;
+        }
+    }
 
    public void setupExtraModelBakeryData(ModelBakerySubsystem modelService) {
    }
@@ -201,12 +210,18 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
    @Override
    protected void free0() {
-      this.scratchFramebuffer.free();
-      this.fb.free();
-      this.sectionRenderer.free();
-      this.depthStencilSetup.delete();
-      super.free0();
-   }
+        var cleanup = new ExceptionCleanup(null);
+        this.releaseBaseResources(cleanup);
+        cleanup.rethrow();
+    }
+
+    private void releaseBaseResources(ExceptionCleanup cleanup) {
+        if (this.sectionRenderer != null) cleanup.run(this.sectionRenderer::free);
+        if (this.depthStencilSetup != null) cleanup.run(this.depthStencilSetup::delete);
+        if (this.scratchFramebuffer != null) cleanup.run(this.scratchFramebuffer::free);
+        if (this.fb != null) cleanup.run(this.fb::free);
+        cleanup.run(super::free0);
+    }
 
    public void addDebug(List<String> debug) {
       this.sectionRenderer.addDebug(debug);

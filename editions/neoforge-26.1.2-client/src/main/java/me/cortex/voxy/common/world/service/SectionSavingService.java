@@ -1,6 +1,8 @@
 package me.cortex.voxy.common.world.service;
 
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.locks.LockSupport;
+import me.cortex.voxy.common.util.Pair;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.thread.Service;
 import me.cortex.voxy.common.thread.ServiceManager;
@@ -12,66 +14,112 @@ public class SectionSavingService {
    private final Service service;
    private final ConcurrentLinkedDeque<SectionSavingService.SaveEntry> saveQueue = new ConcurrentLinkedDeque<>();
 
+   private static final long RETRY_DELAY_NANOS = 100_000_000L;
+   private static final long SHUTDOWN_RETRY_NANOS = 5_000_000_000L;
+   private static final ThreadLocal<Boolean> DRAINING = ThreadLocal.withInitial(() -> Boolean.FALSE);
+   private volatile long retryAtNanos;
+   private volatile Throwable lastFailure;
+
    public SectionSavingService(ServiceManager sm) {
-      this.service = sm.createServiceNoCleanup(() -> this::processJob, 100L, "Section saving service");
+      this.service = sm.createService(() -> new Pair<>(this::processJob, () -> {}),
+      100, "Section saving service", this::canRetry);
+   }
+
+   private boolean canRetry() {
+      long deadline = this.retryAtNanos;
+      return deadline == 0 || System.nanoTime() - deadline >= 0;
+   }
+
+   public Throwable getLastFailure() {
+      return this.lastFailure;
+   }
+
+   public boolean isLive() {
+      return this.service.isLive();
+   }
+
+   private void awaitRetry() {
+      boolean interrupted = Thread.interrupted();
+      try {
+         while (!this.canRetry()) {
+            LockSupport.parkNanos(this.retryAtNanos - System.nanoTime());
+            interrupted |= Thread.interrupted();
+         }
+      } finally {
+         if (interrupted) Thread.currentThread().interrupt();
+      }
    }
 
    private void processJob() {
-      SectionSavingService.SaveEntry task = this.saveQueue.pop();
-      WorldSection section = task.section;
-      section.assertNotFree();
-
+      this.awaitRetry();
+      var task = this.saveQueue.poll();
+      if (task == null) return;
+      var section = task.section;
+      boolean outermost = !DRAINING.get();
       try {
+         if (outermost) DRAINING.set(Boolean.TRUE);
+         section.assertNotFree();
          if (section.exchangeIsInSaveQueue(false)) {
             section.setNotDirty();
             task.engine.storage.saveSection(section);
-         } else {
-            section.setNotDirty();
+            this.lastFailure = null;
          }
-      } catch (Throwable var7) {
-         section.exchangeIsInSaveQueue(false);
-         section.setNotDirty();
-         Logger.error("Voxy saver had an exception while executing please check logs and report error", var7);
+      } catch (Throwable failure) {
+         // 只恢复脏标记，不能清除保存期间新任务取得的队列标记。
+         section.markDirty();
+         this.lastFailure = failure;
+         this.retryAtNanos = System.nanoTime() + RETRY_DELAY_NANOS;
+         Logger.error("Voxy saver failed to save a section; dirty data retained for retry", failure);
       } finally {
-         section.release();
+         try {
+            // 最后一次释放可能再次入队；禁止递归进入同一线程的背压 drain。
+            section.release();
+         } finally {
+            if (outermost) DRAINING.set(Boolean.FALSE);
+         }
       }
    }
 
    public boolean enqueueSave(WorldEngine in, WorldSection section, boolean nonBlocking, boolean sectionAlreadyAcquired) {
-      if (section.exchangeIsInSaveQueue(true)) {
+      // flag 与引用仅在发布成功后交给队列；异常前回滚不得触发保存递归。
+      if (!section.exchangeIsInSaveQueue(true)) return false;
+      boolean acquired = false;
+      boolean published = false;
+      try {
          if (!sectionAlreadyAcquired) {
             section.acquire();
+            acquired = true;
          }
 
-         if (!nonBlocking && this.getTaskCount() > 5000) {
+         if (!nonBlocking && !DRAINING.get() && this.getTaskCount() > SOFT_MAX_QUEUE_SIZE) {
             Thread.yield();
 
-            while (this.getTaskCount() > 5000 && this.service.isLive() && this.service.steal()) {
+            while (this.getTaskCount() > SOFT_MAX_QUEUE_SIZE && this.service.isLive() && this.canRetry() && this.service.steal()) {
                this.processJob();
             }
          }
 
          this.saveQueue.add(new SectionSavingService.SaveEntry(in, section));
-         this.service.execute();
+         published = true;
+         if (this.service.isLive()) this.service.execute();
          return true;
-      } else {
-         return false;
+      } catch (RuntimeException | Error failure) {
+         if (published) throw new WorldEngine.SaveEnqueueException(failure);
+         section.exchangeIsInSaveQueue(false);
+         if (acquired) WorldEngine.releaseFailedSave(section, failure);
+         throw failure;
       }
    }
 
    public void shutdown() {
-      if (this.service.numJobs() != 0) {
-         Logger.info("Finishing " + this.service.numJobs() + " queued Voxy section saves before shutdown.");
-
-         while (this.service.steal()) {
-            this.processJob();
-         }
-      }
-
-      this.service.shutdown();
-
+      // 先等在途任务退出，再有界重试；失败时保留队列及其引用，允许再次调用。
+      if (this.service.isLive()) this.service.shutdown();
+      long started = System.nanoTime();
       while (!this.saveQueue.isEmpty()) {
          this.processJob();
+         if (!this.saveQueue.isEmpty() && System.nanoTime() - started >= SHUTDOWN_RETRY_NANOS) {
+            throw new IllegalStateException("Voxy saves are still failing; unsaved sections and storage remain open", this.lastFailure);
+         }
       }
    }
 

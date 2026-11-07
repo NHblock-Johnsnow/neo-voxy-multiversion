@@ -102,7 +102,8 @@ public class VoxelIngestService {
          boolean allEmpty = true;
 
          for (LevelChunkSection section : chunk.getSections()) {
-            if (section != null && shouldIngestSection(section, chunk.getPos().x(), ++i, chunk.getPos().z())) {
+               ++i;
+            if (section != null && shouldIngestSection(section, chunk.getPos().x(), i, chunk.getPos().z())) {
                allEmpty &= section.hasOnlyAir();
                SectionPos pos = SectionPos.of(chunk.getPos(), i);
                if (lightingProvider.getDebugSectionType(LightLayer.SKY, pos) == SectionType.LIGHT_AND_DATA
@@ -116,7 +117,8 @@ public class VoxelIngestService {
             i = chunk.getMinSectionY() - 1;
 
             for (LevelChunkSection sectionx : chunk.getSections()) {
-               if (sectionx != null && shouldIngestSection(sectionx, chunk.getPos().x(), ++i, chunk.getPos().z())) {
+               ++i;
+               if (sectionx != null && shouldIngestSection(sectionx, chunk.getPos().x(), i, chunk.getPos().z())) {
                   engine.acquireRef();
                   this.ingestQueue.add(new VoxelIngestService.IngestSection(chunk.getPos().x(), i, chunk.getPos().z(), engine, sectionx, null, null));
 
@@ -139,7 +141,8 @@ public class VoxelIngestService {
             i = chunk.getMinSectionY() - 1;
 
             for (LevelChunkSection sectionxx : chunk.getSections()) {
-               if (sectionxx != null && shouldIngestSection(sectionxx, chunk.getPos().x(), ++i, chunk.getPos().z())) {
+               ++i;
+               if (sectionxx != null && shouldIngestSection(sectionxx, chunk.getPos().x(), i, chunk.getPos().z())) {
                   SectionPos pos = SectionPos.of(chunk.getPos(), i);
                   DataLayer bl = blp.getDataLayerData(pos);
                   if (bl != null) {

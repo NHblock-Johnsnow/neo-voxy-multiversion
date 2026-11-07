@@ -59,6 +59,11 @@ bool modelIsLeaf(BlockModel model) {
     return ((model.flagsA)&128u) != 0;
 }
 
+bool modelIsFluid(BlockModel model) {
+    return ((model.flagsA)&4096u) != 0;
+}
+
 float modelFluidHeight(BlockModel model) {
-    return float((model.flagsA >> 8u) & 31u) / 9.0;
+    // 高度占 8..11 位，12 位是流体标记。
+    return float((model.flagsA >> 8u) & 15u) / 9.0;
 }

@@ -28,8 +28,15 @@ public class SaveLoadSystem3 {
    }
 
    public static MemoryBuffer serialize(WorldSection section) {
+       synchronized (section) {
+           return serializeLocked(section);
+       }
+   }
+
+   private static MemoryBuffer serializeLocked(WorldSection section) {
       SaveLoadSystem3.SerializationCache cache = CACHE.get();
       long[] data = section.data;
+       var coverage = section.getSurfaceData();
       Long2ShortOpenHashMap LUT = cache.lutMapCache;
       LUT.clear();
       MemoryBuffer buffer = cache.memoryBuffer().createUntrackedUnfreeableReference();
@@ -67,12 +74,15 @@ public class SaveLoadSystem3 {
          long metadata = METADATA_FORMAT_TAG;
          metadata |= Integer.toUnsignedLong(LUT.size());
          metadata |= Byte.toUnsignedLong(section.getNonEmptyChildren()) << 16;
-         MemoryUtil.memPutLong(metadataPtr, metadata);
+         metadata |= SurfaceDataCodec.metadata(coverage);
+       MemoryUtil.memPutLong(metadataPtr, metadata);
+         ptr = SurfaceDataCodec.write(ptr, coverage);
          return buffer.subSize(ptr - buffer.address);
       }
    }
 
    public static boolean deserialize(WorldSection section, MemoryBuffer data) {
+       if (data.size < 16) return false;
       long ptr = data.address;
       long key = MemoryUtil.memGetLong(ptr);
       ptr += 8L;
@@ -82,6 +92,18 @@ public class SaveLoadSystem3 {
       } else {
          long metadata = MemoryUtil.memGetLong(ptr);
          ptr += 8L;
+         SurfaceDataCodec.tag(metadata);
+         if (data.size < 16L + WorldSection.SECTION_VOLUME * 2L + 8L) return false;
+         final int lutSize = (int) (metadata & 0xFFFF);
+         if (lutSize < 1 || lutSize > WorldSection.SECTION_VOLUME) return false;
+         long lutEnd = data.address + 16L + WorldSection.SECTION_VOLUME * 2L + lutSize * 8L;
+         SurfaceDataCoverage coverage;
+         try {
+            coverage = SurfaceDataCodec.read(metadata, section.lvl, lutEnd, data.address + data.size);
+         } catch (IllegalArgumentException invalid) {
+            Logger.error("Invalid surface data in section " + section.key + ": " + invalid.getMessage());
+            return false;
+         }
          section.nonEmptyChildren = (byte)(metadata >>> 16 & 255L);
          long lutBasePtr = ptr + 65536L;
          long[] blockData = section.data;
@@ -90,7 +112,9 @@ public class SaveLoadSystem3 {
          boolean repairChildMetadata = (metadata & METADATA_FORMAT_MASK) != METADATA_FORMAT_TAG;
 
          for (int i = 0; i < 32768; i++) {
-            long block = MemoryUtil.memGetLong(lutBasePtr + Short.toUnsignedLong(MemoryUtil.memGetShort(ptr)) * 8L);
+            int index = Short.toUnsignedInt(MemoryUtil.memGetShort(ptr));
+            if (index >= lutSize) return false;
+            long block = MemoryUtil.memGetLong(lutBasePtr + index * 8L);
             blockData[i] = block;
             ptr += 2L;
             if ((section.lvl == 0 || repairChildMetadata && inferredChildren != 255) && !Mapper.isAir(block)) {
@@ -117,13 +141,15 @@ public class SaveLoadSystem3 {
          }
 
          ptr = lutBasePtr + (metadata & 65535L) * 8L;
+         section.legacySurfaceSource = section.lvl == 0 && coverage.mode() == 0;
+         section.surfaceData = coverage;
          return true;
       }
    }
 
    private record SerializationCache(Long2ShortOpenHashMap lutMapCache, MemoryBuffer memoryBuffer) {
       public SerializationCache() {
-         this(new Long2ShortOpenHashMap(1024), ThreadLocalMemoryBuffer.create(328704L));
+         this(new Long2ShortOpenHashMap(1024), ThreadLocalMemoryBuffer.create(328704L + SurfaceDataCoverage.MAX_BYTES));
          this.lutMapCache.defaultReturnValue((short)-1);
       }
    }

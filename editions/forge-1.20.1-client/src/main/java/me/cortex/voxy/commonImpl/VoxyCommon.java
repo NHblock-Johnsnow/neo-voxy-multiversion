@@ -61,8 +61,8 @@ public class VoxyCommon {
     public static void shutdownInstance() {
         if (INSTANCE != null) {
             var instance = INSTANCE;
-            INSTANCE = null;//Make it null before shutdown
             instance.shutdown();
+            INSTANCE = null;
         }
     }
 

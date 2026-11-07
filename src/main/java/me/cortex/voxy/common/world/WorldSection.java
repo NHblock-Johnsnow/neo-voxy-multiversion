@@ -79,6 +79,10 @@ public final class WorldSection {
 
     //Serialized states
     long metadata;
+    volatile SurfaceDataCoverage surfaceData;
+    volatile long surfaceMigrationRetryAfter;
+    // 旧格式 L0 快照可供整段恢复，新建段只能使用已有输入的覆盖标记。
+    volatile boolean legacySurfaceSource;
     volatile long[] data = null;
     volatile long uniformValue;
     //data == null is a legal state now (uniform), so it can no longer double as the released marker
@@ -101,6 +105,7 @@ public final class WorldSection {
         this.z = z;
         this.key = WorldEngine.getWorldSectionId(lvl, x, y, z);
         this.tracker = tracker;
+        this.surfaceData = SurfaceDataCoverage.legacy(lvl);
 
         //Start uniform - the loaders either fill in a real uniform value or materialise. Nothing is
         //allocated until something actually needs a per-voxel array.
@@ -109,11 +114,16 @@ public final class WorldSection {
     }
 
     void primeForReuse() {
-        ATOMIC_STATE_HANDLE.set(this, 1);
+        // 复用时直接持有加载者引用，避免迟到卸载回调看到零引用窗口。
+        ATOMIC_STATE_HANDLE.set(this, 3);
     }
 
     public boolean isUniform() {
         return this.data == null;
+    }
+
+    public SurfaceDataCoverage getSurfaceData() {
+        return this.surfaceData;
     }
 
     public long getUniformValue() {
@@ -300,8 +310,9 @@ public final class WorldSection {
         byte msk = (byte) (1<<childIdx);
         byte prev, next;
         do {
-            prev = this.getNonEmptyChildren();
-            next = (byte) ((prev&(~msk))|(child.getNonEmptyChildren()!=0?msk:0));
+            prev = (byte) NON_EMPTY_CHILD_HANDLE.getVolatile(this);
+            next = (byte) ((prev&(~msk))|((byte) NON_EMPTY_CHILD_HANDLE.getVolatile(child)!=0?msk:0));
+            if (prev == next) return 0;
         } while (!NON_EMPTY_CHILD_HANDLE.compareAndSet(this, prev, next));
 
         return ((prev!=0)^(next!=0))?2:(prev!=next?1:0);

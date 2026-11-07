@@ -12,6 +12,7 @@ import net.neoforged.fml.loading.FMLPaths;
 
 import java.io.FileReader;
 import java.io.IOException;
+import java.lang.reflect.Modifier;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
@@ -32,7 +33,7 @@ public class VoxyConfig {
     private static final Gson GSON = new GsonBuilder()
             .setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES)
             .setPrettyPrinting()
-            .excludeFieldsWithModifiers(java.lang.reflect.Modifier.PRIVATE)
+            .excludeFieldsWithModifiers(Modifier.PRIVATE, Modifier.STATIC, Modifier.TRANSIENT)
             .create();
 
     public static VoxyConfig CONFIG = loadOrCreate();

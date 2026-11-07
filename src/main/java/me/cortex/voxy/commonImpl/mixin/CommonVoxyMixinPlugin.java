@@ -43,6 +43,10 @@ public class CommonVoxyMixinPlugin implements IMixinConfigPlugin {
     @Override
     public List<String> getMixins() {
         List<String> mixins = new ArrayList<>();
+        if (createInstalled) {
+            mixins.add("create.MixinCarriageShapeRevision");
+            mixins.add("create.MixinCarriageBlockChange");
+        }
         if (simpleBackupsInstalled) {
             mixins.add("simplebackups.MixinBackupThread");
         }

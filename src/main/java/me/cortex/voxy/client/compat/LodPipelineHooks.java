@@ -38,6 +38,9 @@ import static org.lwjgl.opengl.GL13C.GL_TEXTURE0;
 import static org.lwjgl.opengl.GL13C.glActiveTexture;
 import static org.lwjgl.opengl.GL30C.GL_DRAW_FRAMEBUFFER_BINDING;
 import static org.lwjgl.opengl.GL30C.GL_VERTEX_ARRAY_BINDING;
+import static org.lwjgl.opengl.GL30C.glGetIntegeri;
+import static org.lwjgl.opengl.GL33C.GL_SAMPLER_BINDING;
+import static org.lwjgl.opengl.GL33C.glBindSampler;
 
 /**
  * 可选联动渲染器的统一调度入口。
@@ -49,6 +52,8 @@ public final class LodPipelineHooks {
     public interface Renderer {
         // depthFunc 是管线使用的近距离比较函数：反向 Z 为 GEQUAL，否则为 LEQUAL。
         void render(AbstractRenderPipeline pipeline, Viewport<?> viewport, int depthFunc);
+
+        default void onResourceReload() {}
     }
 
     public interface TranslucentRenderer {
@@ -78,6 +83,16 @@ public final class LodPipelineHooks {
 
     public static void register(Renderer renderer) {
         RENDERERS.add(renderer);
+    }
+
+    public static void onResourceReload() {
+        for (Renderer renderer : RENDERERS) {
+            try {
+                renderer.onResourceReload();
+            } catch (Throwable error) {
+                Logger.error("LOD compatibility resource invalidation failed", error);
+            }
+        }
     }
 
     public static void registerTranslucent(TranslucentRenderer renderer) {
@@ -202,10 +217,12 @@ public final class LodPipelineHooks {
         int previousProgram = glGetInteger(GL_CURRENT_PROGRAM);
         int previousVao = glGetInteger(GL_VERTEX_ARRAY_BINDING);
         int previousActiveTexture = glGetInteger(GL_ACTIVE_TEXTURE);
-        int[] previousTextures = new int[4];
-        for (int unit = 0; unit < previousTextures.length; unit++) {
+        long[] previousBindings = new long[4];
+        for (int unit = 0; unit < previousBindings.length; unit++) {
             glActiveTexture(GL_TEXTURE0 + unit);
-            previousTextures[unit] = glGetInteger(GL_TEXTURE_BINDING_2D);
+            // 一个槽保存纹理和 sampler，避免额外分配数组。
+            previousBindings[unit] = Integer.toUnsignedLong(glGetInteger(GL_TEXTURE_BINDING_2D))
+                    | ((long) glGetIntegeri(GL_SAMPLER_BINDING, unit) << 32);
         }
         glActiveTexture(previousActiveTexture);
 
@@ -225,9 +242,10 @@ public final class LodPipelineHooks {
             body.run();
         } finally {
             // 原生绑定用于同步 GlStateManager 的缓存和实际 OpenGL 状态。
-            for (int unit = 0; unit < previousTextures.length; unit++) {
+            for (int unit = 0; unit < previousBindings.length; unit++) {
                 glActiveTexture(GL_TEXTURE0 + unit);
-                glBindTexture(GL_TEXTURE_2D, previousTextures[unit]);
+                glBindTexture(GL_TEXTURE_2D, (int) previousBindings[unit]);
+                glBindSampler(unit, (int) (previousBindings[unit] >>> 32));
             }
             glActiveTexture(previousActiveTexture);
             GlStateManager._glUseProgram(previousProgram);

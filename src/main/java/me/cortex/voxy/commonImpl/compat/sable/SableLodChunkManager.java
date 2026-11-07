@@ -359,11 +359,25 @@ public final class SableLodChunkManager {
         int minChunkZ = Mth.floor(bounds.minZ()) >> 4;
         int maxChunkZ = Mth.floor(bounds.maxZ()) >> 4;
 
-        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
-            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
-                ChunkPos chunkPos = new ChunkPos(chunkX, chunkZ);
-                if (isChunkWithinHorizontalDistance(level, chunkPos, maxHorizontalDistanceSquared)) {
-                    desiredChunks.add(chunkPos.toLong());
+        if (!(maxHorizontalDistanceSquared >= 0.0)) return;
+        double radius = Math.sqrt(maxHorizontalDistanceSquared);
+        // 先裁到每位玩家的可见圆，再按列收窄；工作量不再随整艘巨船的面积增长。
+        for (var player : level.players()) {
+            double playerX = player.getX(), playerZ = player.getZ();
+            int firstX = Math.max(minChunkX, Mth.floor(Math.nextDown((playerX - radius) / 16.0)));
+            int lastX = Math.min(maxChunkX, Mth.floor(Math.nextUp((playerX + radius) / 16.0)));
+            for (int chunkX = firstX; chunkX <= lastX; chunkX++) {
+                double dx = distanceToRange(playerX, chunkX * 16.0, chunkX * 16.0 + 16.0);
+                double remaining = maxHorizontalDistanceSquared - dx * dx;
+                if (remaining < 0.0) continue;
+                double span = Math.nextUp(Math.sqrt(remaining));
+                int firstZ = Math.max(minChunkZ, Mth.floor(Math.nextDown((playerZ - span) / 16.0)));
+                int lastZ = Math.min(maxChunkZ, Mth.floor(Math.nextUp((playerZ + span) / 16.0)));
+                for (int chunkZ = firstZ; chunkZ <= lastZ; chunkZ++) {
+                    long chunk = ChunkPos.asLong(chunkX, chunkZ);
+                    if (desiredChunks.contains(chunk)) continue;
+                    double dz = distanceToRange(playerZ, chunkZ * 16.0, chunkZ * 16.0 + 16.0);
+                    if (dx * dx + dz * dz <= maxHorizontalDistanceSquared) desiredChunks.add(chunk);
                 }
             }
         }

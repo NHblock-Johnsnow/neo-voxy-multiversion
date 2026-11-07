@@ -13,7 +13,7 @@ import java.util.UUID;
 
 public final class FarEntityProtocol {
     public static final int VERSION = 7;
-    private static final int MAX_PLAYERS_PER_PACKET = 1024;
+    public static final int MAX_PLAYERS_PER_PACKET = 1024;
     private static final int MAX_STRING_BYTES = 32767;
     public static final int MAX_VEHICLE_DATA_BYTES = 256 * 1024;
     private static final byte[] EMPTY_BYTES = new byte[0];
@@ -148,8 +148,11 @@ public final class FarEntityProtocol {
                 readVarInt(buf), buf.readBoolean());
     }
 
-    private static void encodePlayers(ByteBuf buf, PlayerBatch batch) {
+    static void encodePlayers(ByteBuf buf, PlayerBatch batch) {
         writeUtf(buf, batch.dimensionKey());
+        if (batch.players().size() > MAX_PLAYERS_PER_PACKET) {
+            throw new IllegalArgumentException("Too many far players: " + batch.players().size());
+        }
         writeVarInt(buf, batch.players().size());
         for (PlayerSnapshot player : batch.players()) {
             writeUuid(buf, player.uuid());
@@ -176,7 +179,7 @@ public final class FarEntityProtocol {
         }
     }
 
-    private static PlayerBatch decodePlayers(ByteBuf buf) {
+    static PlayerBatch decodePlayers(ByteBuf buf) {
         String dimension = readUtf(buf);
         int size = readVarInt(buf);
         if (size < 0 || size > MAX_PLAYERS_PER_PACKET) {

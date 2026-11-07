@@ -86,18 +86,18 @@ public class MixinRenderSectionManager {
     private boolean voxy$updateOnUpload(RenderSection instance, BuiltSectionInfo info) {
         boolean wasBuilt = instance.getFlags()!=0;
         int flags = instance.getFlags();
-        instance.setInfo(info);
+        boolean changed = instance.setInfo(info);
         if (wasBuilt == (instance.getFlags()!=0)) {//Only want to do stuff on change
-            return true;
+            return changed;
         }
 
         flags |= instance.getFlags();
         if (flags == 0)//Only process things with stuff
-            return true;
+            return changed;
 
         VoxyRenderSystem system = ((IGetVoxyRenderSystem)(this.level.levelRenderer)).voxy$getRenderSystem();
         if (system == null) {
-            return true;
+            return changed;
         }
         int x = instance.getChunkX(), y = instance.getChunkY(), z = instance.getChunkZ();
 
@@ -131,7 +131,7 @@ public class MixinRenderSectionManager {
 
         //The chunk bound mask is streamed from sodium's render-list traversal (MixinSectionCollector),
         //not tracked from build events - nothing to update here
-        return true;
+        return changed;
     }
 
     //The bound mask mirrors sodium's render list: restart the stream whenever sodium rebuilds it.

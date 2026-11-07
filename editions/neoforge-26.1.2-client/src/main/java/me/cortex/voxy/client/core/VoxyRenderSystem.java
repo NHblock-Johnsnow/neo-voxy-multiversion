@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core;
 
+import me.cortex.voxy.common.util.ExceptionCleanup;
+
 import com.mojang.blaze3d.opengl.GlStateManager;
 import java.util.Arrays;
 import java.util.List;
@@ -58,7 +60,7 @@ public class VoxyRenderSystem {
    private final HierarchicalOcclusionTraverser traversal;
    private final RenderDistanceTracker renderDistanceTracker;
    private final BoundRenderer boundOutlineRenderer;
-   public final StreamedBoundStore visbleSectionStream = new StreamedBoundStore();
+   public final StreamedBoundStore visbleSectionStream;
    @Nullable
    private ColumnStreamedBoundStore columnStreamedBoundStore;
    private final ViewportSelector<?> viewportSelector;
@@ -70,7 +72,7 @@ public class VoxyRenderSystem {
    }
 
    public VoxyRenderSystem(WorldEngine world, ServiceManager sm) {
-      world.acquireRef();
+      this.worldIn = world;
       Logger.info("Creating Voxy render system");
       System.gc();
       if ((Integer)Minecraft.getInstance().options.renderDistance().get() < 3) {
@@ -85,15 +87,19 @@ public class VoxyRenderSystem {
          oldBufferBindings[i] = GL30C.glGetIntegeri(37075, i);
       }
 
-      try {
+      GlBuffer borrowedGeometry = null;
+        world.acquireRef();
+        try {
+            this.visbleSectionStream = new StreamedBoundStore();
          GL30C.glFinish();
          GL30C.glFinish();
-         this.worldIn = world;
+
          this.properties = RenderProperties.getRenderProperties();
          AbstractSectionRenderer.Factory<? extends Viewport<?>, ?> backendFactory = (AbstractSectionRenderer.Factory<? extends Viewport<?>, ?>)getRenderBackendFactory();
          this.modelService = new ModelBakerySubsystem(world.getMapper());
          this.renderGen = new RenderGenerationService(world, this.modelService, sm, IUsesMeshlets.class.isAssignableFrom(backendFactory.clz()));
-         this.geometryData = new BasicSectionGeometryData(1048576, RenderResourceReuse.getOrCreateGeometryBuffer());
+         borrowedGeometry = RenderResourceReuse.getOrCreateGeometryBuffer();
+                this.geometryData = new BasicSectionGeometryData(1048576, borrowedGeometry);
          this.nodeManager = new AsyncNodeManager(2097152, this.geometryData, this.renderGen);
          this.nodeCleaner = new NodeCleaner(this.nodeManager);
          this.traversal = new HierarchicalOcclusionTraverser(this.nodeManager, this.nodeCleaner, this.renderGen);
@@ -123,23 +129,29 @@ public class VoxyRenderSystem {
                + sectionRenderer.getClass().getSimpleName()
                + "'"
          );
-      } catch (RuntimeException var8) {
-         world.releaseRef();
-         throw var8;
-      }
 
-      for (int i = 0; i < oldBufferBindings.length; i++) {
-         GL30C.glBindBufferBase(37074, i, oldBufferBindings[i]);
-      }
+            this.restoreConstructorBindings(oldBufferBindings);
+        } catch (RuntimeException | Error failure) {
+            var cleanup = new ExceptionCleanup(failure);
+            this.releaseResources(cleanup, borrowedGeometry);
+            cleanup.run(() -> this.restoreConstructorBindings(oldBufferBindings));
+            throw failure;
+        }
+    }
 
-      for (int i = 0; i < 12; i++) {
-         GlStateManager._activeTexture(33984 + i);
-         GlStateManager._bindTexture(0);
-         GL33.glBindSampler(i, 0);
-      }
-   }
+    private void restoreConstructorBindings(int[] bindings) {
+        for (int i = 0; i < bindings.length; i++) {
+           GL30C.glBindBufferBase(37074, i, bindings[i]);
+        }
 
-   public Viewport<?> setupViewport(
+        for (int i = 0; i < 12; i++) {
+           GlStateManager._activeTexture(33984 + i);
+           GlStateManager._bindTexture(0);
+           GL33.glBindSampler(i, 0);
+        }
+    }
+
+    public Viewport<?> setupViewport(
       Matrix4fc vanillaProjection, Matrix4fc modelView, FogParameters fogParameters, int width, int height, double cameraX, double cameraY, double cameraZ
    ) {
       Viewport<? extends Viewport<?>> viewport = (Viewport<? extends Viewport<?>>)this.getViewport();
@@ -399,49 +411,48 @@ public class VoxyRenderSystem {
    }
 
    public void shutdown() {
-      Logger.info("Flushing download stream");
-      DownloadStream.INSTANCE.flushWaitClear();
-      Logger.info("Shutting down rendering");
+        Logger.info("Shutting down rendering");
+        var cleanup = new ExceptionCleanup(null);
+        var geometry = (BasicSectionGeometryData)this.geometryData;
+        this.releaseResources(cleanup, geometry.isExternalGeometryBuffer ? geometry.getGeometryBuffer() : null);
+        try {
+            cleanup.rethrow();
+        } catch (RuntimeException | Error failure) {
+            Logger.error("Error shutting down renderer components", failure);
+        }
+        Logger.info("Render shutdown completed");
+    }
 
-      try {
-         this.worldIn.setDirtyCallback(null);
-         this.worldIn.getMapper().setBiomeCallback(null);
-         this.worldIn.getMapper().setStateCallback(null);
-         this.nodeManager.stop();
-         this.modelService.shutdown();
-         this.renderGen.shutdown();
-         this.traversal.free();
-         this.nodeCleaner.free();
-         this.geometryData.free();
-         if (((BasicSectionGeometryData)this.geometryData).isExternalGeometryBuffer) {
-            RenderResourceReuse.giveBackGeometryBuffer(((BasicSectionGeometryData)this.geometryData).getGeometryBuffer());
-         }
-
-         this.boundOutlineRenderer.free();
-         this.visbleSectionStream.free();
-         if (this.columnStreamedBoundStore != null) {
-            this.columnStreamedBoundStore.free();
-            this.columnStreamedBoundStore = null;
-         }
-
-         this.viewportSelector.free();
-      } catch (Exception var3) {
-         Logger.error("Error shutting down renderer components", var3);
-      }
-
-      Logger.info("Shutting down render pipeline");
-
-      try {
-         this.pipeline.free();
-      } catch (Exception var2) {
-         Logger.error("Error releasing render pipeline", var2);
-      }
-
-      Logger.info("Flushing download stream");
-      DownloadStream.INSTANCE.flushWaitClear();
-      this.worldIn.releaseRef();
-      Logger.info("Render shutdown completed");
-   }
+    private void releaseResources(ExceptionCleanup cleanup, GlBuffer borrowedGeometry) {
+        boolean interrupted = Thread.interrupted();
+        try {
+            cleanup.run(() -> this.worldIn.setDirtyCallback(null));
+            cleanup.run(() -> this.worldIn.getMapper().setBiomeCallback(null));
+            cleanup.run(() -> this.worldIn.getMapper().setStateCallback(null));
+            cleanup.run(() -> DownloadStream.INSTANCE.flushWaitClear());
+            if (this.nodeManager != null) {
+                cleanup.run(() -> this.nodeManager.stop(this.renderGen::shutdown));
+            } else if (this.renderGen != null) {
+                cleanup.run(this.renderGen::shutdown);
+            }
+            interrupted |= Thread.interrupted();
+            if (this.modelService != null) cleanup.run(this.modelService::shutdown);
+            interrupted |= Thread.interrupted();
+            cleanup.run(() -> DownloadStream.INSTANCE.flushWaitClear());
+            if (this.boundOutlineRenderer != null) cleanup.run(this.boundOutlineRenderer::free);
+            if (this.visbleSectionStream != null) cleanup.run(this.visbleSectionStream::free);
+            if (this.columnStreamedBoundStore != null) cleanup.run(this.columnStreamedBoundStore::free);
+            if (this.viewportSelector != null) cleanup.run(this.viewportSelector::free);
+            if (this.pipeline != null) cleanup.run(this.pipeline::free);
+            if (this.traversal != null) cleanup.run(this.traversal::free);
+            if (this.nodeCleaner != null) cleanup.run(this.nodeCleaner::free);
+            if (this.geometryData != null) cleanup.run(this.geometryData::free);
+            if (borrowedGeometry != null) cleanup.run(() -> RenderResourceReuse.giveBackGeometryBuffer(borrowedGeometry));
+            cleanup.run(this.worldIn::releaseRef);
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+    }
 
    public WorldEngine getEngine() {
       return this.worldIn;

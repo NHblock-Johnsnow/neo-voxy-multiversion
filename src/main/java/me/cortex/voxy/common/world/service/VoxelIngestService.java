@@ -14,7 +14,6 @@ import me.cortex.voxy.commonImpl.WorldIdentifier;
 import me.cortex.voxy.commonImpl.compat.DomumOrnamentumCompat;
 import net.minecraft.core.SectionPos;
 import net.minecraft.world.level.LightLayer;
-import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
@@ -33,13 +32,14 @@ public class VoxelIngestService {
             int cx, int cy, int cz,
             WorldEngine world,
             LevelChunk chunk,
-            BlockEntity[] domumBlockEntities,
+            DomumOrnamentumCompat.CapturedBlock[] domumBlockEntities,
             LevelChunkSection section,
             DataLayer blockLight,
             DataLayer skyLight,
             me.cortex.voxy.commonImpl.compat.littletiles.LittleTilesCompat.SectionSnapshot littleTiles) {
     }
     private final ConcurrentLinkedDeque<IngestSection> ingestQueue = new ConcurrentLinkedDeque<>();
+    private boolean accepting = true;
 
     public VoxelIngestService(ServiceManager pool) {
         this.service = pool.createServiceNoCleanup(()->this::processJob, 5000, "Ingest service");
@@ -171,15 +171,10 @@ public class VoxelIngestService {
             for (var section : chunk.getSections()) {
                 i++;
                 if (section == null || !shouldIngestSection(section, chunk.getPos().x, i, chunk.getPos().z)) continue;
-                engine.acquireRef();
-                this.ingestQueue.add(new IngestSection(
+                if (!this.queueIngest(new IngestSection(
                         chunk.getPos().x, i, chunk.getPos().z, engine, chunk,
                         domumBlockEntities.forSection(i), snapshotCustomSection(section), null, null,
-                        littleTiles == null ? null : littleTiles.section(i)));
-                try {
-                    this.service.execute();
-                } catch (Exception e) {
-                    Logger.error("Executing had an error: assume shutting down, aborting",e);
+                        littleTiles == null ? null : littleTiles.section(i)))) {
                     break;
                 }
             }
@@ -217,16 +212,10 @@ public class VoxelIngestService {
                 }
             }
 
-            //If its null for either, assume failure to obtain lighting and ignore section
-            engine.acquireRef();
-            this.ingestQueue.add(new IngestSection(
+            if (!this.queueIngest(new IngestSection(
                     chunk.getPos().x, i, chunk.getPos().z, engine, chunk,
                     domumBlockEntities.forSection(i), snapshotCustomSection(section), bl, sl,
-                    littleTiles == null ? null : littleTiles.section(i)));
-            try {
-                this.service.execute();
-            } catch (Exception e) {
-                Logger.error("Executing had an error: assume shutting down, aborting",e);
+                    littleTiles == null ? null : littleTiles.section(i)))) {
                 break;
             }
         }
@@ -239,13 +228,33 @@ public class VoxelIngestService {
 
     /** 停止服务并释放队列中尚未执行任务持有的世界引用。 */
     public void shutdown() {
+        synchronized (this) {
+            this.accepting = false;
+        }
         this.service.shutdown();
         //Every queued task still holds a world ref - drain and release so worlds can close
-        while (!this.ingestQueue.isEmpty()) {
-            var task = this.ingestQueue.pop();
-            if (task != null) {
-                task.world().releaseRef();
-            }
+        IngestSection task;
+        while ((task = this.ingestQueue.poll()) != null) {
+            task.world().releaseRef();
+        }
+    }
+
+    /** 快照成功后才持有引用；与停止入队共用锁，避免清队列后再追加任务。 */
+    private synchronized boolean queueIngest(IngestSection task) {
+        if (!this.accepting || !this.service.isLive()) return false;
+        task.world.acquireRef();
+        boolean queued = false;
+        try {
+            this.ingestQueue.add(task);
+            queued = true;
+            this.service.execute();
+            return true;
+        } catch (Exception e) {
+            Logger.error("Executing had an error: assume shutting down, aborting", e);
+            return false;
+        } finally {
+            // 入队后由 worker 或 shutdown 释放，调度失败也不能在此重复释放。
+            if (!queued) task.world.releaseRef();
         }
     }
 
@@ -269,21 +278,12 @@ public class VoxelIngestService {
 
     /** 供网络/兼容层提交单个区段，调用方不直接接触队列引用计数。 */
     private boolean rawIngest0(WorldEngine engine, LevelChunk chunk, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl) {
-        engine.acquireRef();
-        BlockEntity[] domumBlockEntities =
+        DomumOrnamentumCompat.CapturedBlock[] domumBlockEntities =
                 DomumOrnamentumCompat.captureBlockEntities(chunk, section);
         var littleTiles = me.cortex.voxy.commonImpl.compat.littletiles.LittleTilesCompat.capture(chunk);
-        this.ingestQueue.add(new IngestSection(
+        return this.queueIngest(new IngestSection(
                 x, y, z, engine, chunk, domumBlockEntities, snapshotCustomSection(section), bl, sl,
                 littleTiles == null ? null : littleTiles.section(y)));
-        try {
-            this.service.execute();
-            return true;
-        } catch (Exception e) {
-            //Task stays queued; shutdown's queue drain releases its ref exactly once
-            Logger.error("Executing had an error: assume shutting down, aborting",e);
-            return false;
-        }
     }
 
     public static boolean rawIngest(WorldIdentifier id, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl) {

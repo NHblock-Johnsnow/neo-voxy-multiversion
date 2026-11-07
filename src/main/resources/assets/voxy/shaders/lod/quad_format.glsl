@@ -36,7 +36,7 @@ uint extractBlendIdx(uint64_t quad) {
 }
 
 uint extractFluidLowerHeight(uint64_t quad) {
-    return quadUsesBlendPalette(quad) == 0u ? Eu32(quad, 4, 42) : 0u;
+    return Eu32(quad, 4, 42);
 }
 
 uint extractFluidShapePayload(uint64_t quad) {
@@ -44,7 +44,7 @@ uint extractFluidShapePayload(uint64_t quad) {
 }
 
 bool quadHasFluidShape(uint64_t quad) {
-    return quadUsesBlendPalette(quad) == 0u && Eu32(quad, 4, 42) != 0u;
+    return Eu32(quad, 4, 42) != 0u;
 }
 
 bool isQuadEmpty(uint64_t quad) {
@@ -99,7 +99,7 @@ uint extractBlendIdx(ivec2 quad) {
 }
 
 uint extractFluidLowerHeight(ivec2 quad) {
-    return quadUsesBlendPalette(quad) == 0u ? Eu32v(quad, 4, 42) : 0u;
+    return Eu32v(quad, 4, 42);
 }
 
 uint extractFluidShapePayload(ivec2 quad) {
@@ -107,7 +107,7 @@ uint extractFluidShapePayload(ivec2 quad) {
 }
 
 bool quadHasFluidShape(ivec2 quad) {
-    return quadUsesBlendPalette(quad) == 0u && Eu32v(quad, 4, 42) != 0u;
+    return Eu32v(quad, 4, 42) != 0u;
 }
 
 bool isQuadEmpty(ivec2 quad) {

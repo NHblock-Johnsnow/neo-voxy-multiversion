@@ -1,9 +1,7 @@
 package me.cortex.voxy.client.core.util;
 
 import it.unimi.dsi.fastutil.longs.Long2ByteOpenHashMap;
-import me.cortex.voxy.common.Logger;
 
-import java.util.Random;
 
 //Tracks a ring and load/unload positions
 // can process N of these load/unload positions
@@ -188,23 +186,5 @@ public class RingTracker {
         return ret;
     }
 
-    public static void main(String[] args) {
-        for (int j = 0; j < 50; j++) {
-            Random r = new Random((j+18723)*1234);
-            var tracker = new RingTracker(r.nextInt(100)+1, 0, 0, true);
-            int R = r.nextInt(500);
-            for (int i = 0; i < 50_000; i++) {
-                int x = r.nextInt(R*2+1)-R;
-                int z = r.nextInt(R*2+1)-R;
-                tracker.moveCenter(x, z);
-            }
-            tracker.fillRing(false);
-            tracker.process(64, (x,z)->{
-                Logger.info("Add:", x,",",z);
-            }, (x,z)->{
-                Logger.info("Remove:", x,",",z);
-            });
-        }
 
-    }
 }

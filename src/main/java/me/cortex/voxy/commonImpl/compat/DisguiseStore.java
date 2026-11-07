@@ -48,6 +48,14 @@ public final class DisguiseStore {
         }
     }
 
+    public static boolean clearIfPresent(SectionStorage storage, String table, int sx, int sy, int sz) {
+        if (storage == null || !storage.supportsAuxTable(table)) return false;
+        long key = keyOf(sx, sy, sz);
+        if (storage.getAux(table, key) == null) return false;
+        storage.deleteAux(table, key);
+        return true;
+    }
+
     public interface EntryConsumer {
         void accept(int localIndex, int variantId);
     }

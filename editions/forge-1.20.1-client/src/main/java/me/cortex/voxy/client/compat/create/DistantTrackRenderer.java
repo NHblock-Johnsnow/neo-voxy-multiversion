@@ -41,11 +41,39 @@ import static org.lwjgl.opengl.GL30C.glBindVertexArray;
 public final class DistantTrackRenderer implements LodPipelineHooks.Renderer {
     public static final DistantTrackRenderer INSTANCE = new DistantTrackRenderer();
     private static final long RECHECK_MS = 5000;
-    private final List<MeshUnit> units = new ArrayList<>();
-    private ResourceKey<Level> dimension;
+    private List<MeshUnit> units = new ArrayList<>();
     private long lastCheck;
     private long checksum;
-    private final java.util.Set<BlockPos> replacementBlocks = new java.util.HashSet<>();
+    private net.minecraft.client.multiplayer.ClientLevel bakedLevel;
+    private net.minecraft.client.multiplayer.ClientLevel checkedLevel;
+    private boolean rebuildPending;
+    private boolean rebuilding;
+    private long resourceGeneration;
+    private static final int MESH_ATTEMPTS_PER_TICK = 2;
+    private BakeTask pendingBake;
+
+    private static final class BakeTask {
+        final net.minecraft.client.multiplayer.ClientLevel level;
+        final long generation;
+        final Object railways = CreateClient.RAILWAYS;
+        final long version = CreateClient.RAILWAYS.version;
+        final List<TrackGraph> graphs = new ArrayList<>(CreateClient.RAILWAYS.trackNetworks.values());
+        final long[] checksums = new long[this.graphs.size()];
+        final List<MeshUnit> replacement = new ArrayList<>();
+        final java.util.Set<BlockPos> blocks = new java.util.HashSet<>();
+        long checksum = 1;
+        java.util.Iterator<Map.Entry<Long, List<TrackBlockAt>>> sections;
+        java.util.Iterator<Turn> turns;
+
+        BakeTask(net.minecraft.client.multiplayer.ClientLevel level, long generation) {
+            this.level = level;
+            this.generation = generation;
+            for (int i = 0; i < this.graphs.size(); i++) {
+                this.checksums[i] = this.graphs.get(i).getChecksum();
+                this.checksum = this.checksum * 31 + this.checksums[i];
+            }
+        }
+    }
 
     private record MeshUnit(DistantMesh mesh, double x, double y, double z) {}
     private record Turn(TrackGraph graph, TrackEdge edge,
@@ -63,10 +91,17 @@ public final class DistantTrackRenderer implements LodPipelineHooks.Renderer {
             this.clear();
             return;
         }
+        if (this.rebuilding) return;
+        if (this.pendingBake != null) {
+            this.bakePending(mc);
+            return;
+        }
         long now = System.currentTimeMillis();
-        boolean changedDimension = !mc.level.dimension().equals(this.dimension);
-        if (!changedDimension && now - this.lastCheck < RECHECK_MS) return;
+        boolean changedLevel = mc.level != this.bakedLevel;
+        if (mc.level == this.checkedLevel && now - this.lastCheck < RECHECK_MS) return;
         this.lastCheck = now;
+        this.checkedLevel = mc.level;
+        if (changedLevel) me.cortex.voxy.client.compat.distant.TrackLodReplacement.clear();
         long next = 1;
         try {
             for (TrackGraph graph : CreateClient.RAILWAYS.trackNetworks.values()) {
@@ -75,15 +110,9 @@ public final class DistantTrackRenderer implements LodPipelineHooks.Renderer {
         } catch (Throwable ignored) {
             return;
         }
-        if (!changedDimension && next == this.checksum) return;
-        this.dimension = mc.level.dimension();
-        this.checksum = next;
-        try {
-            this.rebuild(mc);
-        } catch (Throwable t) {
-            this.clear();
-            Logger.error("Distant Create track bake failed", t);
-        }
+        if (!changedLevel && !this.rebuildPending && next == this.checksum) return;
+        this.rebuildPending = true;
+        this.bakePending(mc);
     }
 
     @SubscribeEvent
@@ -94,7 +123,7 @@ public final class DistantTrackRenderer implements LodPipelineHooks.Renderer {
     @Override
     public void render(AbstractRenderPipeline pipeline, Viewport<?> viewport, int depthFunc) {
         var mc = Minecraft.getInstance();
-        if (mc.level == null || !mc.level.dimension().equals(this.dimension)
+        if (mc.level == null || mc.level != this.bakedLevel
                 || !VoxyConfig.CONFIG.distantTracks || this.units.isEmpty()) return;
         double min = Math.max(16.0, mc.options.getEffectiveRenderDistance() * 16.0);
         double minSq = min * min;
@@ -136,22 +165,19 @@ public final class DistantTrackRenderer implements LodPipelineHooks.Renderer {
         }
     }
 
-    private void rebuild(Minecraft mc) {
-        me.cortex.voxy.client.compat.distant.TrackLodReplacement.clear();
-        this.replacementBlocks.clear();
-        for (MeshUnit unit : this.units) unit.mesh.free();
-        this.units.clear();
+        private BakeTask prepareBake(Minecraft mc, ResourceKey<Level> dimension) {
+        var task = new BakeTask(mc.level, this.resourceGeneration);
         Map<BlockPos, BlockState> blocks = new LinkedHashMap<>();
         List<Turn> turns = new ArrayList<>();
         List<Straight> straights = new ArrayList<>();
-        for (TrackGraph graph : new ArrayList<>(CreateClient.RAILWAYS.trackNetworks.values())) {
+        for (TrackGraph graph : task.graphs) {
             for (TrackNodeLocation location : new ArrayList<>(graph.getNodes())) {
-                if (!this.dimension.equals(location.getDimension())) continue;
+                if (!dimension.equals(location.getDimension())) continue;
                 TrackNode node = graph.locateNode(location);
                 if (node == null) continue;
                 for (var connection : graph.getConnectionsFrom(node).entrySet()) {
                     TrackNode other = connection.getKey();
-                    if (!this.dimension.equals(other.getLocation().getDimension())) continue;
+                    if (!dimension.equals(other.getLocation().getDimension())) continue;
                     TrackEdge edge = connection.getValue();
                     if (edge.isTurn()) {
                         var curve = edge.getTurn();
@@ -175,9 +201,113 @@ public final class DistantTrackRenderer implements LodPipelineHooks.Renderer {
             long key = BlockPos.asLong(pos.getX() >> 4, pos.getY() >> 4, pos.getZ() >> 4);
             sections.computeIfAbsent(key, ignored -> new ArrayList<>()).add(new TrackBlockAt(pos, entry.getValue()));
         }
-        for (var entry : sections.entrySet()) bakeSection(mc, entry.getKey(), entry.getValue());
-        for (Turn turn : turns) bakeTurn(mc, turn.curve);
-        me.cortex.voxy.client.compat.distant.TrackLodReplacement.upload(this.replacementBlocks);
+        task.sections = sections.entrySet().iterator();
+        task.turns = turns.iterator();
+        return task;
+    }
+
+    private void bakePending(Minecraft mc) {
+        this.rebuilding = true;
+        var level = mc.level;
+        long generation = this.resourceGeneration;
+        BakeTask task = this.pendingBake;
+        try {
+            if (task == null) {
+                task = this.prepareBake(mc, mc.level.dimension());
+                if (this.isCurrentBake(mc, task.level, task.generation) && this.currentRailways(task)) {
+                    this.pendingBake = task;
+                }
+            }
+            int budget = MESH_ATTEMPTS_PER_TICK;
+            while (this.pendingBake == task && this.isCurrentBake(mc, task.level, task.generation)
+                    && this.currentRailways(task) && budget-- > 0) {
+                if (task.sections.hasNext()) {
+                    var section = task.sections.next();
+                    this.bakeSection(mc, section.getKey(), section.getValue(), task.replacement, task.blocks);
+                    task.sections.remove();
+                } else if (task.turns.hasNext()) {
+                    this.bakeTurn(mc, task.turns.next().curve(), task.replacement);
+                } else {
+                    break;
+                }
+            }
+            if (!this.isCurrentBake(mc, task.level, task.generation)) {
+                me.cortex.voxy.client.compat.distant.TrackLodReplacement.clear();
+                this.cancelBake();
+                return;
+            }
+            if (this.pendingBake != task || !this.currentRailways(task)) {
+                this.cancelBake();
+                this.lastCheck = 0;
+                return;
+            }
+            if (task.sections.hasNext() || task.turns.hasNext()) return;
+            // 跨 tick 的图只在完整接管前再核对一次；稳定帧不增加全图扫描。
+            if (!this.graphsMatch(task)) {
+                this.cancelBake();
+                this.lastCheck = 0;
+                return;
+            }
+            if (!this.isCurrentBake(mc, task.level, task.generation)) {
+                me.cortex.voxy.client.compat.distant.TrackLodReplacement.clear();
+                this.cancelBake();
+                return;
+            }
+            me.cortex.voxy.client.compat.distant.TrackLodReplacement.upload(task.blocks);
+            if (!this.isCurrentBake(mc, task.level, task.generation) || !this.currentRailways(task)
+                    || !this.graphsMatch(task)) {
+                me.cortex.voxy.client.compat.distant.TrackLodReplacement.clear();
+                this.cancelBake();
+                this.lastCheck = 0;
+                return;
+            }
+            var previous = this.units;
+            this.units = task.replacement;
+            this.pendingBake = null;
+            this.bakedLevel = task.level;
+            this.rebuildPending = false;
+            this.checksum = task.checksum;
+            closeUnits(previous);
+        } catch (Throwable failure) {
+            this.cancelBake();
+            // 从失败时起退避；清理或换世界仍由身份变化触发自然重试。
+            if (this.isCurrentBake(mc, level, generation)) {
+                this.lastCheck = System.currentTimeMillis();
+            } else {
+                me.cortex.voxy.client.compat.distant.TrackLodReplacement.clear();
+            }
+            Logger.error("Distant Create track bake failed", failure);
+        } finally {
+            if (task != null && this.pendingBake != task && this.units != task.replacement) {
+                closeUnits(task.replacement);
+            }
+            this.rebuilding = false;
+        }
+    }
+
+    private boolean currentRailways(BakeTask task) {
+        return CreateClient.RAILWAYS == task.railways && CreateClient.RAILWAYS.version == task.version;
+    }
+
+    private boolean graphsMatch(BakeTask task) {
+        var networks = CreateClient.RAILWAYS.trackNetworks;
+        if (networks.size() != task.graphs.size()) return false;
+        for (int i = 0; i < task.graphs.size(); i++) {
+            TrackGraph graph = task.graphs.get(i);
+            if (networks.get(graph.id) != graph || graph.getChecksum() != task.checksums[i]) return false;
+        }
+        return this.currentRailways(task);
+    }
+
+    private void cancelBake() {
+        var task = this.pendingBake;
+        this.pendingBake = null;
+        // 回调重入时由外层 finally 回收，避免边烘焙边释放临时集合。
+        if (task != null && !this.rebuilding) closeUnits(task.replacement);
+    }
+
+    private boolean isCurrentBake(Minecraft mc, net.minecraft.client.multiplayer.ClientLevel level, long generation) {
+        return mc.level == level && this.resourceGeneration == generation;
     }
 
     private static void putAnchor(Minecraft mc, BlockPos pos, Map<BlockPos, BlockState> blocks) {
@@ -234,23 +364,27 @@ public final class DistantTrackRenderer implements LodPipelineHooks.Renderer {
         return (diff.x > 0) == (diff.z > 0) ? TrackShape.PD : TrackShape.ND;
     }
 
-    private void bakeSection(Minecraft mc, long key, List<TrackBlockAt> blocks) {
+    private void bakeSection(Minecraft mc, long key, List<TrackBlockAt> blocks, List<MeshUnit> replacement, java.util.Set<BlockPos> replacementBlocks) {
         int sx = BlockPos.getX(key) << 4, sy = BlockPos.getY(key) << 4, sz = BlockPos.getZ(key) << 4;
         var builder = new DistantMesh.Builder();
-        for (TrackBlockAt entry : blocks) {
-            int light = LevelRenderer.getLightColor(mc.level, entry.pos.above());
-            builder.blockModelLit(entry.state, mc.getBlockRenderer().getBlockModel(entry.state), entry.pos,
-                    entry.pos.getX() - sx, entry.pos.getY() - sy, entry.pos.getZ() - sz,
-                    light & 0xFFFF, light >>> 16 & 0xFFFF);
-        }
-        DistantMesh mesh = builder.build();
-        if (mesh != null) {
-            this.units.add(new MeshUnit(mesh, sx, sy, sz));
-            for (TrackBlockAt entry : blocks) this.replacementBlocks.add(entry.pos);
+        try {
+            for (TrackBlockAt entry : blocks) {
+                int light = LevelRenderer.getLightColor(mc.level, entry.pos.above());
+                builder.blockModelLit(entry.state, mc.getBlockRenderer().getBlockModel(entry.state), entry.pos,
+                        entry.pos.getX() - sx, entry.pos.getY() - sy, entry.pos.getZ() - sz,
+                        light & 0xFFFF, light >>> 16 & 0xFFFF);
+            }
+            DistantMesh mesh = builder.build();
+            if (mesh != null) {
+                replacement.add(new MeshUnit(mesh, sx, sy, sz));
+                for (TrackBlockAt entry : blocks) replacementBlocks.add(entry.pos);
+            }
+        } finally {
+            builder.discard();
         }
     }
 
-    private void bakeTurn(Minecraft mc, com.simibubi.create.content.trains.track.BezierConnection curve) {
+    private void bakeTurn(Minecraft mc, com.simibubi.create.content.trains.track.BezierConnection curve, List<MeshUnit> replacement) {
         BlockPos anchor = curve.bePositions.getFirst();
         BlockPos far = curve.bePositions.getSecond();
         int lightA = LevelRenderer.getLightColor(mc.level, anchor.above());
@@ -273,9 +407,11 @@ public final class DistantTrackRenderer implements LodPipelineHooks.Renderer {
                     float t = (float) i / (girders.length - 1);
                     int block = Math.round(net.minecraft.util.Mth.lerp(t, lightA & 0xFFFF, lightB & 0xFFFF));
                     int sky = Math.round(net.minecraft.util.Mth.lerp(t, lightA >>> 16 & 0xFFFF, lightB >>> 16 & 0xFFFF));
-                    for (boolean first : new boolean[]{true, false}) {
+                    for (int side = 0; side < 2; side++) {
+                        boolean first = side == 0;
                         builder.transformedModel(AllPartialModels.GIRDER_SEGMENT_MIDDLE.get(), girders.beams[i].get(first).pose(), block, sky);
-                        for (boolean top : new boolean[]{true, false}) {
+                        for (int cap = 0; cap < 2; cap++) {
+                            boolean top = cap == 0;
                             builder.transformedModel((top ? AllPartialModels.GIRDER_SEGMENT_TOP
                                     : AllPartialModels.GIRDER_SEGMENT_BOTTOM).get(),
                                     girders.beamCaps[i].get(top).get(first).pose(), block, sky);
@@ -283,22 +419,37 @@ public final class DistantTrackRenderer implements LodPipelineHooks.Renderer {
                     }
                 }
             }
-        } catch (Throwable t) {
-            Logger.error("Distant curved track bake failed at " + anchor, t);
-            DistantMesh partial = builder.build();
-            if (partial != null) partial.free();
-            return;
+            DistantMesh mesh = builder.build();
+            if (mesh != null) replacement.add(new MeshUnit(mesh, anchor.getX(), anchor.getY(), anchor.getZ()));
+        } finally {
+            builder.discard();
         }
-        DistantMesh mesh = builder.build();
-        if (mesh != null) this.units.add(new MeshUnit(mesh, anchor.getX(), anchor.getY(), anchor.getZ()));
+    }
+
+    private static void closeUnits(List<MeshUnit> units) {
+        for (MeshUnit unit : units) {
+            try {
+                unit.mesh.free();
+            } catch (Throwable failure) {
+                Logger.error("Freeing distant track mesh", failure);
+            }
+        }
+    }
+
+    @Override
+    public void onResourceReload() {
+        this.clear();
     }
 
     private void clear() {
+        this.resourceGeneration++;
+        this.cancelBake();
         me.cortex.voxy.client.compat.distant.TrackLodReplacement.clear();
-        this.replacementBlocks.clear();
-        for (MeshUnit unit : this.units) unit.mesh.free();
+        closeUnits(this.units);
         this.units.clear();
-        this.dimension = null;
+        this.bakedLevel = null;
+        this.checkedLevel = null;
+        this.rebuildPending = false;
         this.checksum = 0;
         this.lastCheck = 0;
     }

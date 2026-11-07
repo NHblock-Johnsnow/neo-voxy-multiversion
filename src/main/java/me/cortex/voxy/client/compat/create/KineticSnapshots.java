@@ -10,14 +10,24 @@ import net.minecraft.resources.ResourceLocation;
 
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Queue;
-import java.util.concurrent.ConcurrentLinkedQueue;
 
 public final class KineticSnapshots {
     private KineticSnapshots() {}
 
     private static final int CAPTURES_PER_TICK = 64;
+    private static final ThreadLocal<BlockPos.MutableBlockPos> LIGHT_SAMPLE =
+            ThreadLocal.withInitial(BlockPos.MutableBlockPos::new);
     private static int captureBudget;
+    private static long maintenanceTick;
+    private static final Map<KineticBlockEntity, FailedCapture> FAILED_CAPTURES =
+            new com.google.common.collect.MapMaker().weakKeys().makeMap();
+
+    private record FailedCapture(net.minecraft.world.level.block.state.BlockState state,
+                                 int light, long retryAfterTick) {}
+    private static boolean countsDirty;
+    private static boolean meshesDirty;
+    private static boolean gpuBytesDirty;
+    private static long residentGpuBytes;
     private static final int REBAKES_PER_TICK = 4;
     private static final it.unimi.dsi.fastutil.longs.LongOpenHashSet PRIORITY_REBAKE =
             new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
@@ -26,7 +36,7 @@ public final class KineticSnapshots {
                 net.minecraft.core.Direction.Axis axis, float angleRad, int sky, int block,
                 boolean bakeJson, net.minecraft.core.Direction shaftHalfFacing,
                 net.minecraft.core.Direction bearingFacing, float bearingTopAngleRad, boolean woodenTop,
-                float[][] chains, float[] bnbChain, float[] generic, boolean gantryCarriage) {
+                float[][] chains, float[] bnbChain, int[] bnbLights, float[] generic, boolean gantryCarriage) {
 
         boolean hollow() {
             return !this.bakeJson && this.shaftHalfFacing == null && this.bearingFacing == null
@@ -45,21 +55,53 @@ public final class KineticSnapshots {
 
     static final class Bucket {
         final Map<BlockPos, Snap> geoms = new HashMap<>();
+        final java.util.Set<BlockPos> invalidated = new java.util.HashSet<>();
         DistantMesh mesh;
+        java.util.Set<BlockPos> meshPositions = java.util.Set.of();
         boolean dirty;
+        long retryAfterTick;
+
+        void markDirty() {
+            this.dirty = true;
+            meshesDirty = true;
+        }
 
         void close() {
             if (this.mesh != null) {
+                gpuBytesDirty = true;
                 this.mesh.free();
                 this.mesh = null;
             }
+            this.meshPositions = java.util.Set.of();
+            countsDirty = true;
         }
     }
 
     private static final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<Bucket> SECTIONS =
             new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
-    private static final Queue<BlockPos> CAPTURE_QUEUE = new ConcurrentLinkedQueue<>();
-    private static final Queue<BlockPos> REMOVE_QUEUE = new ConcurrentLinkedQueue<>();
+    private static final PositionQueue CAPTURE_QUEUE = new PositionQueue();
+    private static final PositionQueue REMOVE_QUEUE = new PositionQueue();
+
+    // 只排队尚未处理的位置；重复通知不改变首次入队顺序。
+    private static final class PositionQueue {
+        private final java.util.LinkedHashSet<BlockPos> positions = new java.util.LinkedHashSet<>();
+
+        synchronized void add(BlockPos pos) {
+            if (!this.positions.contains(pos)) this.positions.add(pos.immutable());
+        }
+
+        synchronized BlockPos poll() {
+            return this.positions.isEmpty() ? null : this.positions.removeFirst();
+        }
+
+        synchronized int size() {
+            return this.positions.size();
+        }
+
+        synchronized void clear() {
+            this.positions.clear();
+        }
+    }
     private static ResourceLocation dim;
     private static final java.util.Set<BlockPos> BEARING_POSITIONS = new java.util.HashSet<>();
 
@@ -132,12 +174,27 @@ public final class KineticSnapshots {
         if (me.cortex.voxy.client.compat.ShipBorne.isShipBorne(pos)) {
             return;
         }
-        CAPTURE_QUEUE.add(pos.immutable());
+        CAPTURE_QUEUE.add(pos);
     }
 
     //Called on return to the live path or when a fresh visual spawns for the position
     public static void queueRemove(BlockPos pos) {
-        REMOVE_QUEUE.add(pos.immutable());
+        REMOVE_QUEUE.add(pos);
+    }
+
+    public static void onDataUpdated(net.minecraft.world.level.block.entity.BlockEntity be) {
+        var mc = Minecraft.getInstance();
+        if (!(be instanceof KineticBlockEntity kinetic) || be.getLevel() != mc.level || isCapturingOnThisThread()) return;
+        if (!mc.isSameThread()) {
+            mc.execute(() -> onDataUpdated(be));
+            return;
+        }
+        FAILED_CAPTURES.remove(kinetic);
+        BlockPos pos = be.getBlockPos();
+        Bucket bucket = SECTIONS.get(sectionKey(pos));
+        if (bucket != null && bucket.geoms.containsKey(pos) && bucket.invalidated.add(pos.immutable())) {
+            queueCapture(pos);
+        }
     }
 
     private static final java.util.Set<BlockPos> ANCHOR_RECAPTURED = new java.util.HashSet<>();
@@ -166,54 +223,51 @@ public final class KineticSnapshots {
     }
 
 
+    private record GpuEviction(long sectionKey, double distanceSquared) {}
+
     private static void enforceGpuBudget(double camX, double camY, double camZ) {
         long budget = (long) VoxyConfig.CONFIG.distantKineticGpuBudgetMiB * 1024L * 1024L;
         if (budget <= 0) {
             return;
         }
-        long resident = 0;
-        for (var bucket : SECTIONS.values()) {
-            if (bucket.mesh != null) {
-                resident += bucket.mesh.gpuByteSize();
+        if (gpuBytesDirty) {
+            long resident = 0;
+            for (var bucket : SECTIONS.values()) {
+                if (bucket.mesh != null) {
+                    resident += bucket.mesh.gpuByteSize();
+                }
             }
+            residentGpuBytes = resident;
+            gpuBytesDirty = false;
         }
+        long resident = residentGpuBytes;
+        if (resident <= budget) return;
+        var candidates = new java.util.ArrayList<GpuEviction>();
+        for (var entry : SECTIONS.long2ObjectEntrySet()) {
+            if (entry.getValue().mesh == null) continue;
+            long key = entry.getLongKey();
+            double dx = ((BlockPos.getX(key) << 4) + 8) - camX;
+            double dy = ((BlockPos.getY(key) << 4) + 8) - camY;
+            double dz = ((BlockPos.getZ(key) << 4) + 8) - camZ;
+            double distanceSquared = dx * dx + dy * dy + dz * dz;
+            if (distanceSquared >= 0.0) candidates.add(new GpuEviction(key, distanceSquared));
+        }
+        // 超预算才建立距离顺序；连续逐出不再重复扫描所有区段。
+        candidates.sort(java.util.Comparator.comparingDouble(GpuEviction::distanceSquared).reversed());
         long target = (budget * 9L) / 10L;
-        while (resident > budget) {
-            long furthestKey = 0;
-            double furthestDistSq = -1;
-            boolean found = false;
-            for (var entry : SECTIONS.long2ObjectEntrySet()) {
-                if (entry.getValue().mesh == null) {
-                    continue;
-                }
-                long key = entry.getLongKey();
-                double dx = ((BlockPos.getX(key) << 4) + 8) - camX;
-                double dy = ((BlockPos.getY(key) << 4) + 8) - camY;
-                double dz = ((BlockPos.getZ(key) << 4) + 8) - camZ;
-                double distSq = dx * dx + dy * dy + dz * dz;
-                if (distSq > furthestDistSq) {
-                    furthestDistSq = distSq;
-                    furthestKey = key;
-                    found = true;
-                }
-            }
-            if (!found) {
-                break;
-            }
-            var bucket = SECTIONS.remove(furthestKey);
-            if (bucket == null) {
-                break;
-            }
+        for (var candidate : candidates) {
+            if (resident <= target) break;
+            var bucket = SECTIONS.remove(candidate.sectionKey);
+            if (bucket == null) continue;
             resident -= bucket.mesh == null ? 0 : bucket.mesh.gpuByteSize();
             for (BlockPos snapPos : bucket.geoms.keySet()) {
                 BEARING_POSITIONS.remove(snapPos);
             }
             bucket.close();
             me.cortex.voxy.commonImpl.PerfStats.kineticSnapshotEvicted.increment();
-            if (resident <= target) {
-                break;
-            }
         }
+        residentGpuBytes = resident;
+        gpuBytesDirty = false;
     }
 
     public static it.unimi.dsi.fastutil.longs.Long2ObjectMap<Bucket> sections() {
@@ -221,6 +275,8 @@ public final class KineticSnapshots {
     }
 
     public static void clearAll() {
+        KineticAtlasUvs.clear();
+        FAILED_CAPTURES.clear();
         for (Bucket bucket : SECTIONS.values()) {
             bucket.close();
         }
@@ -233,125 +289,153 @@ public final class KineticSnapshots {
         KineticCull.cachedReachSq = -1;
         sectionCount = 0;
         snapshotCount = 0;
+        countsDirty = false;
+        meshesDirty = false;
+        gpuBytesDirty = false;
+        residentGpuBytes = 0;
+    }
+
+    public static void onResourceReload() {
+        KineticAtlasUvs.onResourceReload();
+        FAILED_CAPTURES.clear();
+        for (Bucket bucket : SECTIONS.values()) {
+            bucket.close();
+            bucket.invalidated.addAll(bucket.geoms.keySet());
+            bucket.markDirty();
+            bucket.retryAfterTick = 0;
+        }
     }
 
     //Client tick (render thread): drain the transition queues, capture, and rebake dirty sections
     public static void tick(Minecraft mc) {
+        maintenanceTick++;
         ClientLevel level = mc.level;
-        if (level == null) {
-            return;
-        }
+        if (level == null) return;
         var cfg = VoxyConfig.CONFIG;
         if (!cfg.isRenderingEnabled() || !cfg.distantKinetics) {
-            if (!SECTIONS.isEmpty()) {
-                    clearAll();
-            }
-                return;
-            }
-            var levelDim = level.dimension().location();
-            if (!levelDim.equals(dim)) {
-                clearAll();
-                dim = levelDim;
-            }
+            clearAll();
+            return;
+        }
+        var levelDim = level.dimension().location();
+        if (!levelDim.equals(dim)) {
+            clearAll();
+            dim = levelDim;
+        }
 
-            BlockPos pos;
-            while ((pos = REMOVE_QUEUE.poll()) != null) {
-                Bucket bucket = SECTIONS.get(sectionKey(pos));
-                Snap removed = bucket == null ? null : bucket.geoms.remove(pos);
-                if (removed != null && !removed.hollow()) {
-                    bucket.dirty = true;
-                    PRIORITY_REBAKE.add(sectionKey(pos));
+        BlockPos pos;
+        while ((pos = REMOVE_QUEUE.poll()) != null) {
+            Bucket bucket = SECTIONS.get(sectionKey(pos));
+            Snap removed = bucket == null ? null : bucket.geoms.remove(pos);
+            if (bucket != null) bucket.invalidated.remove(pos);
+            if (removed != null && !removed.hollow()) {
+                countsDirty = true;
+                bucket.markDirty();
+                PRIORITY_REBAKE.add(sectionKey(pos));
             }
-                BEARING_POSITIONS.remove(pos);
-            }
+            BEARING_POSITIONS.remove(pos);
+        }
 
+        var cam = mc.gameRenderer.getMainCamera().getPosition();
+        double reach = mc.options.getEffectiveRenderDistance() * 16.0;
+        double reachSq = reach * reach;
+        KineticCull.cachedReachSq = reachSq;
+        captureBudget = CAPTURES_PER_TICK;
+        while (captureBudget > 16 && (pos = CAPTURE_QUEUE.poll()) != null) {
+            if (pos.distToCenterSqr(cam.x, cam.y, cam.z) < reachSq) continue;
+            if (loadedBlockEntity(level, pos) instanceof KineticBlockEntity be) {
+                if (hasCurrentSnap(level, pos, be.getBlockState())) continue;
+                if (capture(level, be)) captureBudget--;
+            }
+        }
 
-            var cam = mc.gameRenderer.getMainCamera().getPosition();
-            double reach = mc.options.getEffectiveRenderDistance() * 16.0;
-            double reachSq = reach * reach;
-            KineticCull.cachedReachSq = reachSq;
-            captureBudget = CAPTURES_PER_TICK;
-            while (captureBudget > 16 && (pos = CAPTURE_QUEUE.poll()) != null) {
-                //Raced back inside the live path between the queue and this tick: the visual draws it
-                if (pos.distToCenterSqr(cam.x, cam.y, cam.z) < reachSq) {
-                    continue;
-            }
-                if (loadedBlockEntity(level, pos) instanceof KineticBlockEntity be) {
-                    capture(level, be);
-                    captureBudget--;
-            }
-            }
+        sweep(mc, level, cam.x, cam.y, cam.z, reachSq);
+        rebakeDirty();
+        double maxDist = cfg.createRenderDistance(cfg.distantKineticMaxChunks) + 32.0;
+        pruneSections(cam.x, cam.y, cam.z, maxDist * maxDist);
+        enforceGpuBudget(cam.x, cam.y, cam.z);
+        sectionCount = SECTIONS.size();
+        updateSnapshotCount();
+    }
 
-            sweep(mc, level, cam.x, cam.y, cam.z, reachSq);
-
-            int rebaked = 0;
-            var prio = PRIORITY_REBAKE.iterator();
-            while (prio.hasNext() && rebaked < REBAKES_PER_TICK) {
-                Bucket bucket = SECTIONS.get(prio.nextLong());
-                prio.remove();
-                if (bucket != null && bucket.dirty) {
-                    bucket.dirty = false;
-                    rebake(bucket);
-                    rebaked++;
-                }
-            }
-            for (Bucket bucket : SECTIONS.values()) {
-                if (!bucket.dirty || rebaked >= REBAKES_PER_TICK) {
-                    continue;
-            }
+    private static void rebakeDirty() {
+        int rebaked = 0;
+        var prio = PRIORITY_REBAKE.iterator();
+        while (prio.hasNext() && rebaked < REBAKES_PER_TICK) {
+            Bucket bucket = SECTIONS.get(prio.nextLong());
+            prio.remove();
+            if (bucket != null && bucket.dirty && maintenanceTick >= bucket.retryAfterTick) {
                 bucket.dirty = false;
                 rebake(bucket);
                 rebaked++;
             }
-            double maxDist = cfg.createRenderDistance(cfg.distantKineticMaxChunks) + 32.0;
-            double maxDistSq = maxDist * maxDist;
-            SECTIONS.long2ObjectEntrySet().removeIf(entry -> {
-                long key = entry.getLongKey();
-                double scx = (BlockPos.getX(key) << 4) + 8;
-                double scy = (BlockPos.getY(key) << 4) + 8;
-                double scz = (BlockPos.getZ(key) << 4) + 8;
-                double dx = scx - cam.x, dy = scy - cam.y, dz = scz - cam.z;
-                if (dx * dx + dy * dy + dz * dz > maxDistSq) {
-                    Bucket bucket = entry.getValue();
-                    for (BlockPos snapPos : bucket.geoms.keySet()) {
-                        BEARING_POSITIONS.remove(snapPos);
-                    }
-                    bucket.close();
-                    me.cortex.voxy.commonImpl.PerfStats.kineticSnapshotEvicted.increment();
-                    return true;
-            }
-                return false;
-            });
-            enforceGpuBudget(cam.x, cam.y, cam.z);
-
-            //Prune sections emptied by removals
-            SECTIONS.values().removeIf(bucket -> {
-                if (bucket.geoms.isEmpty()) {
-                    bucket.close();
-                    return true;
-            }
-                return false;
-            });
-            sectionCount = SECTIONS.size();
         }
+        if (!meshesDirty || rebaked >= REBAKES_PER_TICK) return;
+        // 稳定时跳过重建搜索；退避或额度用尽时保留下次搜索。
+        meshesDirty = false;
+        for (Bucket bucket : SECTIONS.values()) {
+            if (rebaked >= REBAKES_PER_TICK) {
+                meshesDirty = true;
+                break;
+            }
+            if (!bucket.dirty) continue;
+            if (maintenanceTick < bucket.retryAfterTick) {
+                meshesDirty = true;
+                continue;
+            }
+            bucket.dirty = false;
+            rebake(bucket);
+            rebaked++;
+        }
+    }
 
-        private static int sweepCursor;
-        private static final int SWEEP_CHUNKS_PER_TICK = 48;
+    private static void pruneSections(double camX, double camY, double camZ, double maxDistSq) {
+        SECTIONS.long2ObjectEntrySet().removeIf(entry -> {
+            Bucket bucket = entry.getValue();
+            // 空桶先释放，避免旧网格占用预算而误逐出有效快照。
+            if (bucket.geoms.isEmpty()) {
+                bucket.close();
+                return true;
+            }
+            long key = entry.getLongKey();
+            double dx = (BlockPos.getX(key) << 4) + 8 - camX;
+            double dy = (BlockPos.getY(key) << 4) + 8 - camY;
+            double dz = (BlockPos.getZ(key) << 4) + 8 - camZ;
+            if (dx * dx + dy * dy + dz * dz <= maxDistSq) return false;
+            for (BlockPos snapPos : bucket.geoms.keySet()) BEARING_POSITIONS.remove(snapPos);
+            bucket.close();
+            me.cortex.voxy.commonImpl.PerfStats.kineticSnapshotEvicted.increment();
+            return true;
+        });
+    }
 
-        private static void sweep(Minecraft mc, ClientLevel level, double camX, double camY, double camZ, double reachSq) {
-            int radius = mc.options.getEffectiveRenderDistance() + 2;
-            int diameter = radius * 2 + 1;
-            int total = diameter * diameter;
-            int centerX = ((int) Math.floor(camX)) >> 4;
-            int centerZ = ((int) Math.floor(camZ)) >> 4;
-            //Hysteresis band: capture starts past the reach, reclaim only 16 blocks inside it, so a
-            //camera hovering on the boundary doesn't churn capture/remove/rebake every sweep pass
-            double innerReach = Math.max(0, Math.sqrt(reachSq) - 16.0);
-            double innerSq = innerReach * innerReach;
-            for (int i = 0; i < SWEEP_CHUNKS_PER_TICK; i++) {
-                int idx = Math.floorMod(sweepCursor++, total);
-                int cx = centerX + (idx % diameter) - radius;
-                int cz = centerZ + (idx / diameter) - radius;
+    private static void updateSnapshotCount() {
+        if (!countsDirty) return;
+        int count = 0;
+        for (Bucket bucket : SECTIONS.values()) {
+            for (Snap snap : bucket.geoms.values()) {
+                if (!snap.hollow()) count++;
+            }
+        }
+        snapshotCount = count;
+        countsDirty = false;
+    }
+
+    private static int sweepCursor;
+    private static final int SWEEP_CHUNKS_PER_TICK = 48;
+
+    private static void sweep(Minecraft mc, ClientLevel level, double camX, double camY, double camZ, double reachSq) {
+        int radius = mc.options.getEffectiveRenderDistance() + 2;
+        int diameter = radius * 2 + 1;
+        int total = diameter * diameter;
+        int centerX = ((int) Math.floor(camX)) >> 4;
+        int centerZ = ((int) Math.floor(camZ)) >> 4;
+        // 回收阈值向内留一格区段，避免边界来回移动时反复捕获。
+        double innerReach = Math.max(0, Math.sqrt(reachSq) - 16.0);
+        double innerSq = innerReach * innerReach;
+        for (int i = 0; i < SWEEP_CHUNKS_PER_TICK; i++) {
+            int idx = Math.floorMod(sweepCursor++, total);
+            int cx = centerX + (idx % diameter) - radius;
+            int cz = centerZ + (idx / diameter) - radius;
             var chunk = level.getChunk(cx, cz, net.minecraft.world.level.chunk.status.ChunkStatus.FULL, false);
             if (!(chunk instanceof net.minecraft.world.level.chunk.LevelChunk levelChunk)) {
                 continue;
@@ -371,7 +455,9 @@ public final class KineticSnapshots {
                         if (levelChunk.getBlockEntities().get(snapPos) instanceof KineticBlockEntity) {
                             return false;
                         }
-                        bucket.dirty = true;
+                        bucket.markDirty();
+                        countsDirty = true;
+                        bucket.invalidated.remove(snapPos);
                         BEARING_POSITIONS.remove(snapPos);
                         return true;
                     });
@@ -395,9 +481,11 @@ public final class KineticSnapshots {
                     if (distSq <= innerSq) {
                         Bucket bucket = SECTIONS.get(sectionKey(bePos));
                         Snap removed = bucket == null ? null : bucket.geoms.remove(bePos);
+                        if (bucket != null) bucket.invalidated.remove(bePos);
                         if (removed != null) {
+                            countsDirty = true;
                             if (!removed.hollow()) {
-                                bucket.dirty = true;
+                                bucket.markDirty();
                                 PRIORITY_REBAKE.add(sectionKey(bePos));
                             }
                             BEARING_POSITIONS.remove(bePos);
@@ -405,7 +493,7 @@ public final class KineticSnapshots {
                     }
                     continue;
                 }
-                if (hasCurrentSnap(bePos, kbe.getBlockState())) {
+                if (hasCurrentSnap(level, bePos, kbe.getBlockState())) {
                     continue;
                 }
                 if (captureBudget <= 0) {
@@ -414,8 +502,7 @@ public final class KineticSnapshots {
                     sweepCursor--;
                     return;
                 }
-                capture(level, kbe);
-                captureBudget--;
+                if (capture(level, kbe)) captureBudget--;
             }
         }
     }
@@ -435,19 +522,61 @@ public final class KineticSnapshots {
         if (bucket == null || bucket.mesh == null) {
             return false;
         }
-        Snap snap = bucket.geoms.get(pos);
-        return snap != null && !snap.hollow();
+        return bucket.meshPositions.contains(pos);
     }
 
-    //Present-and-current test for the dedup sites: a snap (hollow or real) for the same interned
-    //BlockState needs no recapture; a state change at the position invalidates either kind.
-    private static boolean hasCurrentSnap(BlockPos pos, net.minecraft.world.level.block.state.BlockState state) {
+    private static boolean hasCurrentSnap(ClientLevel level, BlockPos pos,
+                                          net.minecraft.world.level.block.state.BlockState state) {
         Bucket bucket = SECTIONS.get(sectionKey(pos));
         if (bucket == null) {
             return false;
         }
         Snap prior = bucket.geoms.get(pos);
-        return prior != null && prior.state() == state;
+        if (prior == null || prior.state() != state || bucket.invalidated.contains(pos)) return false;
+        if (prior.hollow()) return true;
+        int light = sampleCaptureLight(level, pos);
+        if (prior.sky() != DistantLightSampler.sky(light) || prior.block() != DistantLightSampler.block(light)) return false;
+        // 链条另一端的光照也参与网格，源端未更新时仍须核对。
+        if (prior.chains() != null) {
+            for (float[] chain : prior.chains()) {
+                int farLight = sampleChainLight(level, pos.getX() + (int) chain[8],
+                        pos.getY() + (int) chain[9], pos.getZ() + (int) chain[10]);
+                if ((int) chain[6] != DistantLightSampler.sky(farLight)
+                        || (int) chain[7] != DistantLightSampler.block(farLight)) return false;
+            }
+        }
+        if (prior.bnbLights() != null) {
+            int[] samples = prior.bnbLights();
+            for (int i = 0; i < samples.length; i += 4) {
+                if (sampleChainLight(level, samples[i], samples[i + 1], samples[i + 2]) != samples[i + 3]) return false;
+            }
+        }
+        return true;
+    }
+
+    private static int sampleCaptureLight(ClientLevel level, BlockPos pos) {
+        return sampleCaptureLight(level, pos.getX(), pos.getY(), pos.getZ());
+    }
+
+    private static int sampleCaptureLight(ClientLevel level, int x, int y, int z) {
+        // 活体仍可访问时读取原生光照，边缘区段的远景缓存可能缺失或尚未更新。
+        var sample = LIGHT_SAMPLE.get().set(x, y + 1, z);
+        int sky = level.getBrightness(net.minecraft.world.level.LightLayer.SKY, sample);
+        int block = level.getBrightness(net.minecraft.world.level.LightLayer.BLOCK, sample);
+        if ((sky | block) == 0) {
+            sample.set(x, y, z);
+            sky = level.getBrightness(net.minecraft.world.level.LightLayer.SKY, sample);
+            block = level.getBrightness(net.minecraft.world.level.LightLayer.BLOCK, sample);
+        }
+        return sky | (block << 4);
+    }
+
+    static int sampleChainLight(ClientLevel level, int x, int y, int z) {
+        if (level.getChunk(x >> 4, z >> 4, net.minecraft.world.level.chunk.status.ChunkStatus.FULL, false)
+                instanceof net.minecraft.world.level.chunk.LevelChunk) {
+            return sampleCaptureLight(level, x, y, z);
+        }
+        return DistantLightSampler.samplePeek(level, x, y, z);
     }
 
     //Horizontal path: the chunk is unloading and its BEs are about to vanish - capture immediately.
@@ -464,17 +593,29 @@ public final class KineticSnapshots {
             if (!(be instanceof KineticBlockEntity kbe)) {
                 continue;
             }
-            if (hasCurrentSnap(kbe.getBlockPos(), kbe.getBlockState())) {
+            if (hasCurrentSnap(level, kbe.getBlockPos(), kbe.getBlockState())) {
                 continue;
             }
-            capture(level, kbe);
+            // 实体即将不可达，卸载前仍尝试一次；失败记录不延长其生命周期。
+            FAILED_CAPTURES.remove(kbe);
+            try {
+                capture(level, kbe);
+            } finally {
+                FAILED_CAPTURES.remove(kbe);
+            }
         }
     }
 
-    private static void capture(ClientLevel level, KineticBlockEntity be) {
+    private static boolean capture(ClientLevel level, KineticBlockEntity be) {
         BlockPos pos = be.getBlockPos();
+        net.minecraft.world.level.block.state.BlockState state = null;
+        int light = -1;
         try {
-            var state = be.getBlockState();
+            state = be.getBlockState();
+            light = sampleCaptureLight(level, pos);
+            FailedCapture failed = FAILED_CAPTURES.get(be);
+            if (failed != null && failed.state == state && failed.light == light
+                    && maintenanceTick < failed.retryAfterTick) return false;
             var model = Minecraft.getInstance().getModelManager().getBlockModelShaper().getBlockModel(state);
 
             net.minecraft.core.Direction shaftHalfFacing = null;
@@ -507,52 +648,38 @@ public final class KineticSnapshots {
                     double pitch = Math.toDegrees(net.minecraft.util.Mth.atan2(diff.y,
                             diff.multiply(1.0, 0.0, 1.0).length()));
                     var startOff = stats.start().subtract(center);
-                    int farLight = DistantLightSampler.samplePeek(level,
-                            pos.getX() + rel.getX(), pos.getY() + rel.getY() + 1, pos.getZ() + rel.getZ());
+                    int farLight = sampleChainLight(level,
+                            pos.getX() + rel.getX(), pos.getY() + rel.getY(), pos.getZ() + rel.getZ());
                     list.add(new float[]{(float) startOff.x, (float) startOff.y, (float) startOff.z,
                             (float) yaw, (float) pitch, stats.chainLength(),
-                            DistantLightSampler.sky(farLight), DistantLightSampler.block(farLight)});
+                            DistantLightSampler.sky(farLight), DistantLightSampler.block(farLight),
+                            rel.getX(), rel.getY(), rel.getZ()});
                 }
                 chains = list.toArray(new float[0][]);
             }
 
             //bits_n_bobs cogwheel chains: the controlling wheel carries the whole loop's strap geometry
             float[] bnbChain = null;
+            int[] bnbLights = null;
             if (BNB_LOADED) {
                 try {
-                    bnbChain = BnbChainSnapshots.capture(level, be);
+                    var captured = BnbChainSnapshots.captureWithLight(level, be);
+                    if (captured != null) {
+                        bnbChain = captured.vertices();
+                        bnbLights = captured.lights();
+                    }
                 } catch (Throwable ignored) {
                     //the addon's internals moved - the wheel itself still snapshots via its json
                 }
             }
 
-            int light = DistantLightSampler.samplePeek(level, pos.getX(), pos.getY() + 1, pos.getZ());
-            if (DistantLightSampler.sky(light) == 0 && DistantLightSampler.block(light) == 0) {
-                light = DistantLightSampler.samplePeek(level, pos.getX(), pos.getY(), pos.getZ());
-            }
             int skyLight = DistantLightSampler.sky(light), blockLight = DistantLightSampler.block(light);
 
             float[] generic = null;
             var renderer = Minecraft.getInstance().getBlockEntityRenderDispatcher().getRenderer(be);
             if (renderer instanceof KineticBlockEntityRenderer<?>) {
-                int sx = pos.getX() & ~15, sy = pos.getY() & ~15, sz = pos.getZ() & ~15;
-                var consumer = new Capture(pos.getX() - sx, pos.getY() - sy, pos.getZ() - sz, skyLight, blockLight);
-                captureThread = Thread.currentThread();
-                try {
-                    @SuppressWarnings("unchecked")
-                    var raw = (net.minecraft.client.renderer.blockentity.BlockEntityRenderer<KineticBlockEntity>) renderer;
-                    raw.render(be, 1.0f, new com.mojang.blaze3d.vertex.PoseStack(), consumer, light,
-                            net.minecraft.client.renderer.texture.OverlayTexture.NO_OVERLAY);
-                    consumer.flush();
-                    generic = consumer.toArray();
-                    if (generic.length < 9 * 4) {
-                        generic = null;
-                    }
-                } catch (Throwable e) {
-                    generic = null;
-                } finally {
-                    captureThread = null;
-                }
+                generic = captureRenderer(renderer, be, pos, skyLight, blockLight,
+                        net.minecraft.client.renderer.LightTexture.pack(blockLight, skyLight));
             }
             if (generic != null) {
                 shaftHalfFacing = null;
@@ -564,17 +691,20 @@ public final class KineticSnapshots {
                     && model.getQuads(null, net.minecraft.core.Direction.UP, net.minecraft.util.RandomSource.create(42)).isEmpty());
             boolean gantryCarriage = generic == null
                     && be instanceof com.simibubi.create.content.contraptions.gantry.GantryCarriageBlockEntity;
+            FAILED_CAPTURES.remove(be);
             if (generic == null && !bakeJson && shaftHalfFacing == null && bearingFacing == null
                     && chains == null && bnbChain == null && !gantryCarriage) {
                 Bucket bucket = SECTIONS.computeIfAbsent(sectionKey(pos), k -> new Bucket());
                 Snap prior = bucket.geoms.put(pos.immutable(),
-                        new Snap(state, null, 0.0f, 0, 0, false, null, null, 0.0f, false, null, null, null, false));
+                        new Snap(state, null, 0.0f, 0, 0, false, null, null, 0.0f, false, null, null, null, null, false));
+                bucket.invalidated.remove(pos);
+                countsDirty = true;
                 if (prior != null && !prior.hollow()) {
-                    bucket.dirty = true; //the old state had geometry; rebuild the mesh without it
+                    bucket.markDirty(); //the old state had geometry; rebuild the mesh without it
                 }
                 logCapture(pos.toShortString() + " SKIP " + state.getBlock().getDescriptionId()
                         + " (chunk-visible or empty json, no partials)");
-                return;
+                return true;
             }
             net.minecraft.core.Direction.Axis axis = null;
             try {
@@ -584,12 +714,16 @@ public final class KineticSnapshots {
             float angle = axis != null
                     ? KineticBlockEntityRenderer.getRotationOffsetForPosition(be, pos, axis) % 360.0f / 180.0f * (float) Math.PI
                     : 0.0f;
+            KineticAtlasUvs.remember(generic);
+            KineticAtlasUvs.remember(bnbChain);
             Bucket bucket = SECTIONS.computeIfAbsent(sectionKey(pos), k -> new Bucket());
             bucket.geoms.put(pos.immutable(), new Snap(state, axis, angle,
                     skyLight, blockLight,
-                    bakeJson, shaftHalfFacing, bearingFacing, bearingTopAngle, woodenTop, chains, bnbChain, generic,
+                    bakeJson, shaftHalfFacing, bearingFacing, bearingTopAngle, woodenTop, chains, bnbChain, bnbLights, generic,
                     gantryCarriage));
-            bucket.dirty = true;
+            bucket.invalidated.remove(pos);
+            countsDirty = true;
+            bucket.markDirty();
             if (bearingFacing != null) {
                 BEARING_POSITIONS.add(pos.immutable());
                 if (!inManagerRecapture) {
@@ -601,8 +735,30 @@ public final class KineticSnapshots {
                     + " json=" + bakeJson
                     + " angle=" + String.format("%.1f", Math.toDegrees(angle)));
         } catch (Throwable e) {
+            // 同一失败输入退避；新数据、状态、光照或资源重载可立即恢复。
+            FAILED_CAPTURES.put(be, new FailedCapture(state, light, maintenanceTick + 20));
             logCapture(pos.toShortString() + " ERROR " + e);
-            //A broken state must not take the tick down; that block simply keeps the hidden-only cull
+        }
+        return true;
+    }
+
+    private static float[] captureRenderer(
+            net.minecraft.client.renderer.blockentity.BlockEntityRenderer<KineticBlockEntity> renderer,
+            KineticBlockEntity be, BlockPos pos, int skyLight, int blockLight, int light) {
+        var consumer = new Capture(pos.getX() & 15, pos.getY() & 15, pos.getZ() & 15, skyLight, blockLight);
+        Thread previous = captureThread;
+        captureThread = Thread.currentThread();
+        try {
+            renderer.render(be, 1.0f, new com.mojang.blaze3d.vertex.PoseStack(), consumer, light,
+                    net.minecraft.client.renderer.texture.OverlayTexture.NO_OVERLAY);
+            consumer.flush();
+            float[] vertices = consumer.toArray();
+            if (vertices.length % (9 * 4) != 0) {
+                throw new IllegalStateException("Incomplete kinetic quad stream");
+            }
+            return vertices.length == 0 ? null : vertices;
+        } finally {
+            captureThread = previous;
         }
     }
 
@@ -804,17 +960,15 @@ public final class KineticSnapshots {
     }
 
     private static void rebake(Bucket bucket) {
-        if (bucket.mesh != null) {
-            bucket.mesh.free();
-            bucket.mesh = null;
-        }
         var builder = new DistantMeshBuilder();
         try {
+            var meshPositions = new java.util.HashSet<BlockPos>();
             var shaper = Minecraft.getInstance().getModelManager().getBlockModelShaper();
             var transform = new org.joml.Matrix4f();
             for (var entry : bucket.geoms.entrySet()) {
                 BlockPos pos = entry.getKey();
                 Snap snap = entry.getValue();
+                if (!snap.hollow()) meshPositions.add(pos);
                 float lx = pos.getX() & 15, ly = pos.getY() & 15, lz = pos.getZ() & 15;
                 if (snap.generic() != null) {
                     //Full-pass capture, already section-local
@@ -854,19 +1008,18 @@ public final class KineticSnapshots {
                     }
                 }
             }
-            bucket.mesh = builder.build();
+            DistantMesh replacement = builder.build();
+            DistantMesh previous = bucket.mesh;
+            bucket.mesh = replacement;
+            gpuBytesDirty = true;
+            bucket.meshPositions = meshPositions;
+            bucket.retryAfterTick = 0;
+            if (previous != null) previous.free();
         } catch (Throwable e) {
             builder.discard();
+            bucket.markDirty();
+            bucket.retryAfterTick = maintenanceTick + 20;
         }
-        int count = 0;
-        for (Bucket b : SECTIONS.values()) {
-            for (Snap s2 : b.geoms.values()) {
-                if (!s2.hollow()) {
-                    count++;
-                }
-            }
-        }
-        snapshotCount = count;
     }
 
     private static long sectionKey(BlockPos pos) {
@@ -888,7 +1041,8 @@ public final class KineticSnapshots {
     static final class Capture implements net.minecraft.client.renderer.MultiBufferSource, com.mojang.blaze3d.vertex.VertexConsumer {
         private final float ox, oy, oz;
         private final int sky, block;
-        private final java.util.ArrayList<float[]> verts = new java.util.ArrayList<>();
+        private final it.unimi.dsi.fastutil.floats.FloatArrayList verts =
+                new it.unimi.dsi.fastutil.floats.FloatArrayList();
         private boolean pending;
         private float x, y, z, u, v, nx, ny, nz;
 
@@ -901,11 +1055,7 @@ public final class KineticSnapshots {
         }
 
         float[] toArray() {
-            float[] out = new float[this.verts.size() * 9];
-            for (int i = 0; i < this.verts.size(); i++) {
-                System.arraycopy(this.verts.get(i), 0, out, i * 9, 9);
-            }
-            return out;
+            return this.verts.toFloatArray();
         }
 
         @Override
@@ -936,8 +1086,10 @@ public final class KineticSnapshots {
                 shade = 0.6f;
                 face = this.nx > 0 ? 5 : 4;
             }
-            this.verts.add(new float[]{this.x + this.ox, this.y + this.oy, this.z + this.oz,
-                    this.u, this.v, this.sky, this.block, shade, face});
+            this.verts.add(this.x + this.ox); this.verts.add(this.y + this.oy); this.verts.add(this.z + this.oz);
+            this.verts.add(this.u); this.verts.add(this.v);
+            this.verts.add(this.sky); this.verts.add(this.block);
+            this.verts.add(shade); this.verts.add(face);
             this.pending = false;
         }
 

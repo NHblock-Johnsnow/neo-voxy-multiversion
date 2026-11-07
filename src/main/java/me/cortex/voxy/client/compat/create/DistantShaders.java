@@ -126,6 +126,9 @@ public final class DistantShaders {
                                 .addSource(ShaderType.VERTEX, patchedVertex(pipeline))
                                 .addSource(ShaderType.FRAGMENT, fragment)
                                 .compile().name("distant_patched_translucent_vertex");
+                    } else {
+                        // 当前管线不支持补丁，切换管线后再尝试。
+                        translucentPatchFailed = true;
                     }
                 }
                 if (patchedTranslucentVertexLight != null) return patchedTranslucentVertexLight;

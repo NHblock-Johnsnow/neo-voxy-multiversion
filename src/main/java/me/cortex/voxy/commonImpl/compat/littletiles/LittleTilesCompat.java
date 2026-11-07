@@ -69,23 +69,63 @@ public final class LittleTilesCompat {
     public static void beginSection(SectionStorage storage, SectionSnapshot snapshot, LevelChunkSection section,
                                     int sx, int sy, int sz) {
         if (!ENABLED) return;
+        boolean restoring = false;
         if (snapshot == null) {
             if (section != null && section.maybeHas(LittleTilesCompat::isLittleTilesState)) {
                 SectionSnapshot stored = LittleTilesStore.load(storage, sx, sy, sz);
                 if (stored != null) {
-                    ACTIVE_HOLDERS.set(stored.holders());
-                    publish(storage, stored);
+                    snapshot = stored;
+                    restoring = true;
+                } else {
+                    ACTIVE_HOLDERS.remove();
+                    return;
                 }
-                return;
             }
-            snapshot = new SectionSnapshot(sx, sy, sz, List.of(), List.of(), new long[64]);
+            if (snapshot == null) {
+                snapshot = new SectionSnapshot(sx, sy, sz, List.of(), List.of(), new long[64]);
+            }
         }
         SectionSnapshot positioned = snapshot.sx() == sx && snapshot.sy() == sy && snapshot.sz() == sz
                 ? snapshot : new SectionSnapshot(sx, sy, sz, snapshot.materials(), snapshot.cells(), snapshot.holders());
+        var original = positioned;
+        positioned = retainPresentHolders(positioned, section);
         if (positioned.cells().isEmpty()) ACTIVE_HOLDERS.remove();
         else ACTIVE_HOLDERS.set(positioned.holders());
-        LittleTilesStore.save(storage, positioned);
+        if (!restoring || positioned != original) LittleTilesStore.save(storage, positioned);
         publish(storage, positioned);
+    }
+
+    private static SectionSnapshot retainPresentHolders(SectionSnapshot snapshot, LevelChunkSection section) {
+        if (section == null) return snapshot;
+        long[] retained = null;
+        boolean any = false;
+        // 只访问 holder 位图中的坐标；全部有效时复用快照，不复制 cells。
+        for (int word = 0; word < snapshot.holders().length; word++) {
+            long bits = snapshot.holders()[word];
+            while (bits != 0) {
+                int bit = Long.numberOfTrailingZeros(bits);
+                int index = (word << 6) | bit;
+                if (isLittleTilesState(section.getBlockState(index & 15, index >>> 8, (index >>> 4) & 15))) {
+                    any = true;
+                } else {
+                    if (retained == null) retained = snapshot.holders().clone();
+                    retained[word] &= ~(1L << bit);
+                }
+                bits &= bits - 1;
+            }
+        }
+        if (retained == null) return snapshot;
+        if (!any) return new SectionSnapshot(snapshot.sx(), snapshot.sy(), snapshot.sz(),
+                List.of(), List.of(), retained);
+        var cells = new ArrayList<Cell>();
+        for (Cell cell : snapshot.cells()) {
+            int coordinate = cell.coordinate();
+            int index = ((coordinate >>> 3) & 15) | (((coordinate >>> 10) & 15) << 4)
+                    | (((coordinate >>> 17) & 15) << 8);
+            if ((retained[index >>> 6] & (1L << (index & 63))) != 0) cells.add(cell);
+        }
+        return new SectionSnapshot(snapshot.sx(), snapshot.sy(), snapshot.sz(),
+                snapshot.materials(), List.copyOf(cells), retained);
     }
 
     private static void publish(SectionStorage storage, SectionSnapshot snapshot) {

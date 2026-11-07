@@ -94,6 +94,7 @@ public class WorldImporter implements IDataImporter {
     private final Codec<PalettedContainer<BlockState>> blockStateCodec;
     private final int minBuildHeight;
     private final int heightmapBits;
+    private final boolean hasSkyLight;
     private final AtomicInteger estimatedTotalChunks = new AtomicInteger();//Slowly converges to the true value
     private final AtomicInteger totalChunks = new AtomicInteger();
     private final AtomicInteger chunksProcessed = new AtomicInteger();
@@ -107,6 +108,7 @@ public class WorldImporter implements IDataImporter {
         this.world = worldEngine;
         this.minBuildHeight = mcWorld.getMinBuildHeight();
         this.heightmapBits = 32 - Integer.numberOfLeadingZeros(mcWorld.getHeight());
+        this.hasSkyLight = mcWorld.dimensionType().hasSkyLight();
         this.service = sm.createService(()->new Pair<>(()->this.jobQueue.poll().run(), ()->{}), 3, "World importer", runChecker);
 
         var biomeRegistry = mcWorld.registryAccess().registryOrThrow(Registries.BIOME);
@@ -529,17 +531,10 @@ public class WorldImporter implements IDataImporter {
         }
 
         var blockStatesRes = blockStateCodec.parse(NbtOps.INSTANCE, section.getCompound("block_states"));
-        //? if 1.20.1 {
-        blockStatesRes.get().ifRight(partial -> {
-            return;
-        });
-        //?} else {
-        /*if (!blockStatesRes.hasResultOrPartial()) {
-            //TODO: if its only partial, it means should try to upgrade the nbt format with datafixerupper probably
-            return;
-        }
-        *///?}
-        var blockStates = blockStatesRes.getOrThrow(false, Logger::error);
+        // 可用的 partial 保留，无结果只跳过当前区段。
+        var decoded = blockStatesRes.resultOrPartial(Logger::error);
+        if (decoded.isEmpty()) return;
+        var blockStates = decoded.get();
         var biomes = this.defaultBiomeProvider;
         var optBiomes = section.getCompound("biomes");
         if (!optBiomes.isEmpty()) {
@@ -552,7 +547,7 @@ public class WorldImporter implements IDataImporter {
                 biomes,
                 (bx, by, bz) -> {
                     int block = 0;
-                    int sky = surfaceHeights != null && (y * 16 + by) >= surfaceHeights[bx | (bz << 4)] - 1 ? 15 : 0;
+                    int sky = this.hasSkyLight && surfaceHeights != null && (y * 16 + by) >= surfaceHeights[bx | (bz << 4)] - 1 ? 15 : 0;
                     if (blockLight != null) {
                         block = blockLight.get(bx, by, bz);
                     }
@@ -568,6 +563,7 @@ public class WorldImporter implements IDataImporter {
     }
 
     private int[] decodeSurfaceHeights(CompoundTag chunk) {
+        if (!this.hasSkyLight) return null;
         long[] packed = chunk.getCompound("Heightmaps").getLongArray("WORLD_SURFACE");
         if (packed.length == 0) return null;
         int bits = this.heightmapBits;

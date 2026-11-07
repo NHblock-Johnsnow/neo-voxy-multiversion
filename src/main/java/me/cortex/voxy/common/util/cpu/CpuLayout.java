@@ -9,7 +9,6 @@ import net.minecraft.Util;
 import oshi.SystemInfo;
 
 import java.util.Arrays;
-import java.util.Random;
 
 //Represents the layout of the current cpu running on
 public class CpuLayout {
@@ -142,25 +141,6 @@ public class CpuLayout {
         CORES = cores;
     }
 
-    public static void main(String[] args) throws InterruptedException {
-        System.err.println(Arrays.toString(CORES));
-        setThreadAffinity(CORES[0], CORES[1]);
-        for (int i = 0; i < 20; i++) {
-            int finalI = i;
-            new Thread(()->{
-                setThreadAffinity(CORES[finalI&3]);
-                Random r = new Random();
-                int j= 0;
-                while (r.nextLong()!=0) {
-                    j++;
-                }
-                System.out.println(j);
-            }).start();
-        }
-        while (true) {
-            Thread.sleep(100);
-        }
-    }
 
     public static int getCoreCount() {
         if (CORES==null) {

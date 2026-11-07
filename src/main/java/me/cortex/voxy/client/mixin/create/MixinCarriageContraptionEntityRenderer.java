@@ -20,6 +20,7 @@ public class MixinCarriageContraptionEntityRenderer {
     private void voxy$cullBeyondRenderDistance(CarriageContraptionEntity entity, float yaw, float partialTicks,
                                                PoseStack poseStack, MultiBufferSource buffers, int light,
                                                CallbackInfo ci) {
+        if (me.cortex.voxy.compat.far.FarEntityClient.isVehicleProxy(entity)) return;
         if (!VoxyConfig.CONFIG.isRenderingEnabled()) {
             return;
         }

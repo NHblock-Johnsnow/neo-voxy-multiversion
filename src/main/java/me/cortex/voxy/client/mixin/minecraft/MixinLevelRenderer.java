@@ -31,6 +31,7 @@ public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
 
     @Inject(method = "allChanged()V", at = @At("RETURN"), order = 900)//We want to inject before sodium
     private void voxy$reloadVoxyRenderer(CallbackInfo ci) {
+        me.cortex.voxy.client.compat.LodPipelineHooks.onResourceReload();
         var seasonalView = me.cortex.voxy.client.core.compat.eclipticseasons.SeasonalLod.view;
         if (seasonalView != null) {
             try {

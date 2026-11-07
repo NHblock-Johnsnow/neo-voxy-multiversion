@@ -44,7 +44,7 @@ neoForge {
 dependencies {
     // Compile APIs and runtime libraries.
     compileOnly files('libs/compile/sodium-neoforge-0.9.2+mc26.1.2-mod.jar')
-    compileOnly files('libs/compile/iris-neoforge-1.11.4+mc26.1.2.jar')
+    compileOnly files('libs/runtime/iris-neoforge-1.11.4+mc26.1.2.jar')
     compileOnly fileTree('src/main/resources/META-INF/jarjar') {
         include '*.jar'
         // Minecraft 26.1.2 already supplies LZ4.
@@ -74,6 +74,7 @@ tasks.named('processResources') {
 jar {
     destinationDirectory.set(layout.buildDirectory.dir('intermediate-jars'))
     archiveFileName = "${project.archives_base_name}-${project.version}-unoptimized.jar"
+    from('../../README.md')
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 

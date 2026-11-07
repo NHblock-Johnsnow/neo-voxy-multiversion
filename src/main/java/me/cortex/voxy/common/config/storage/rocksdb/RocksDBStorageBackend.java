@@ -36,6 +36,7 @@ public class RocksDBStorageBackend extends StorageBackend {
     //NOTE: closes in order
     private final List<AbstractImmutableNativeReference> closeList = new ArrayList<>();
     private volatile boolean closed;
+    private final java.util.Set<RocksIterator> auxScans = new java.util.HashSet<>();
 
     private void requireOpen() {
         if (this.closed) throw new IllegalStateException("RocksDB storage is closed");
@@ -134,11 +135,10 @@ public class RocksDBStorageBackend extends StorageBackend {
             if (existing != null || !createIfAbsent) {
                 return existing;
             }
-            try {
+            try (var options = new ColumnFamilyOptions()
+                    .setCompressionType(CompressionType.ZSTD_COMPRESSION).optimizeForSmallDb()) {
                 var handle = this.db.createColumnFamily(
-                        new ColumnFamilyDescriptor(name.getBytes(), new ColumnFamilyOptions()
-                                .setCompressionType(CompressionType.ZSTD_COMPRESSION)
-                                .optimizeForSmallDb()));
+                        new ColumnFamilyDescriptor(name.getBytes(java.nio.charset.StandardCharsets.UTF_8), options));
                 this.auxHandles.put(name, handle);
                 this.closeList.add(handle);
                 return handle;
@@ -197,19 +197,40 @@ public class RocksDBStorageBackend extends StorageBackend {
     }
 
     @Override
-    public synchronized void forEachAux(String table, AuxEntryConsumer consumer) {
-        this.requireOpen();
-        var handle = this.auxHandle(table, false);
-        if (handle == null) {
-            return;
+    public void forEachAux(String table, AuxEntryConsumer consumer) {
+        RocksIterator iterator;
+        synchronized (this) {
+            this.requireOpen();
+            var handle = this.auxHandle(table, false);
+            if (handle == null) return;
+            iterator = this.db.newIterator(handle);
+            this.auxScans.add(iterator);
         }
-        try (var iter = this.db.newIterator(handle)) {
-            for (iter.seekToFirst(); iter.isValid(); iter.next()) {
-                byte[] key = iter.key();
-                if (key.length != 8) {
-                    continue;
+        try {
+            synchronized (this) {
+                if (this.closed) return;
+                iterator.seekToFirst();
+            }
+            while (true) {
+                byte[] key, value;
+                synchronized (this) {
+                    if (this.closed) return;
+                    if (!iterator.isValid()) {
+                        iterator.status();
+                        return;
+                    }
+                    key = iterator.key();
+                    value = key.length == 8 ? iterator.value() : null;
+                    iterator.next();
                 }
-                consumer.accept(ByteBuffer.wrap(key).getLong(0), iter.value());
+                // 消费者可等待队列额度；不能在此期间阻塞实时 aux 读写。
+                if (value != null) consumer.accept(ByteBuffer.wrap(key).getLong(0), value);
+            }
+        } catch (RocksDBException error) {
+            throw new RuntimeException("Reading aux table " + table, error);
+        } finally {
+            synchronized (this) {
+                if (this.auxScans.remove(iterator)) iterator.close();
             }
         }
     }
@@ -412,6 +433,9 @@ public class RocksDBStorageBackend extends StorageBackend {
         this.flush();
         // 辅助表访问与关闭共用锁，不能把失效的 native handle 传入 JNI。
         this.closed = true;
+        // native 调用都受同一把锁保护；回调仍可退出，但不会再访问已关迭代器。
+        this.auxScans.forEach(RocksIterator::close);
+        this.auxScans.clear();
         this.closeList.forEach(AbstractImmutableNativeReference::close);
         try {
             this.db.closeE();

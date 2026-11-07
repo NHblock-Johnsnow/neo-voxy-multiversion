@@ -27,7 +27,7 @@ public class VoxySamplers {
                     return 0;
                 }
                 return dt.id;
-            }, new GlSampler(false, true, false, false), opaqueNames);
+            }, GlSampler.MIPPED_NEAREST, opaqueNames);
 
             samplers.addDynamicSampler(TextureType.TEXTURE_2D, () -> {
                 var pipeData = ((IGetIrisVoxyPipelineData)pipeline).voxy$getPipelineData();
@@ -43,7 +43,7 @@ public class VoxySamplers {
                     return 0;
                 }
                 return dt.id;
-            }, new GlSampler(false, true, false, false), translucentNames);
+            }, GlSampler.MIPPED_NEAREST, translucentNames);
         }
     }
 }

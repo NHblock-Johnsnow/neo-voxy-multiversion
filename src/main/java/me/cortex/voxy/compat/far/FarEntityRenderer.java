@@ -34,6 +34,8 @@ import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 import java.util.HashMap;
 import java.io.ByteArrayInputStream;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Objects;
@@ -56,14 +58,54 @@ final class FarEntityRenderer {
     private final FarPlayerTracker tracker;
     private final Map<UUID, PlayerProxy> playerProxies = new HashMap<>();
     private final Map<UUID, Entity> vehicleProxies = new HashMap<>();
-    private final Map<UUID, Integer> vehicleProxyRevisions = new HashMap<>();
-    private final Map<UUID, Integer> failedVehicleRevisions = new HashMap<>();
+    private final Map<UUID, VehicleRevision> vehicleProxyRevisions = new HashMap<>();
+    private final Map<UUID, VehicleRevision> failedVehicleRevisions = new HashMap<>();
+    private final Set<UUID> currentFailedVehicles = new HashSet<>();
     private final Set<UUID> activePlayers = new HashSet<>();
     private final Set<UUID> activeProxyVehicles = new HashSet<>();
     private final Set<UUID> renderedProxyVehicles = new HashSet<>();
 
+    private static final class VehicleRevision {
+        final String typeId;
+        final byte[] renderData;
+        final Map<TrackedPlayer, Integer> validatedOwners = new IdentityHashMap<>();
+
+        VehicleRevision(TrackedPlayer tracked) {
+            this.typeId = tracked.vehicleTypeId();
+            this.renderData = tracked.vehicleRenderData();
+            this.validatedOwners.put(tracked, tracked.vehicleDataRevision());
+        }
+
+        boolean matches(TrackedPlayer tracked) {
+            Integer revision = this.validatedOwners.get(tracked);
+            if (revision != null && revision == tracked.vehicleDataRevision()) return true;
+            if (!this.typeId.equals(tracked.vehicleTypeId())
+                    || !Arrays.equals(this.renderData, tracked.vehicleRenderData())) return false;
+            this.validatedOwners.put(tracked, tracked.vehicleDataRevision());
+            return true;
+        }
+    }
+
+    void onSnapshot() {
+        // revision 计数属于玩家，跨乘客需比较实际数据；同一快照内只比较一次。
+        for (VehicleRevision revision : this.vehicleProxyRevisions.values()) revision.validatedOwners.clear();
+        for (VehicleRevision revision : this.failedVehicleRevisions.values()) revision.validatedOwners.clear();
+        if (this.failedVehicleRevisions.isEmpty()) return;
+        for (TrackedPlayer tracked : this.tracker.players()) {
+            if (!tracked.hasVehicle()) continue;
+            VehicleRevision failed = this.failedVehicleRevisions.get(tracked.vehicleUuid());
+            if (failed != null && failed.matches(tracked)) this.currentFailedVehicles.add(tracked.vehicleUuid());
+        }
+        this.failedVehicleRevisions.keySet().retainAll(this.currentFailedVehicles);
+        this.currentFailedVehicles.clear();
+    }
+
     FarEntityRenderer(FarPlayerTracker tracker) {
         this.tracker = tracker;
+    }
+
+    boolean isVehicleProxy(Entity entity) {
+        return this.vehicleProxies.get(entity.getUUID()) == entity;
     }
 
     void clear() {
@@ -77,6 +119,7 @@ final class FarEntityRenderer {
         this.vehicleProxies.clear();
         this.vehicleProxyRevisions.clear();
         this.failedVehicleRevisions.clear();
+        this.currentFailedVehicles.clear();
         this.activePlayers.clear();
         this.activeProxyVehicles.clear();
         this.renderedProxyVehicles.clear();
@@ -101,7 +144,7 @@ final class FarEntityRenderer {
             return;
         }
         if (this.tracker.isEmpty()) {
-            if (!this.playerProxies.isEmpty() || !this.vehicleProxies.isEmpty()) {
+            if (!this.playerProxies.isEmpty() || !this.vehicleProxies.isEmpty() || !this.failedVehicleRevisions.isEmpty()) {
                 this.clear();
             }
             return;
@@ -172,15 +215,10 @@ final class FarEntityRenderer {
                         this.applyVehicleState(vehicle, tracked, progress);
                         this.activeProxyVehicles.add(tracked.vehicleUuid());
                     }
-                    if (player != null && player.getVehicle() != vehicle) {
-                        try {
-                            if (player.isPassenger()) player.stopRiding();
-                            player.startRiding(vehicle);
-                        } catch (Throwable ignored) {
-                            FAR_MOUNT_ERRORS.increment();
-                        }
-                    }
+                    if (player != null) player.mountVehicle(vehicle, !useLiveVehicle,
+                            tracked.vehicleDataRevision(), animationTick);
                     if (!useLiveVehicle && this.renderedProxyVehicles.add(tracked.vehicleUuid())) {
+                        PoseStack.Pose checkpoint = poseStack.last();
                         poseStack.pushPose();
                         try {
                             dispatcher.render(vehicle,
@@ -193,17 +231,20 @@ final class FarEntityRenderer {
                         } catch (Throwable throwable) {
                             this.rejectVehicleProxy(tracked, player, vehicle, throwable);
                         } finally {
-                            poseStack.popPose();
+                            restorePose(poseStack, checkpoint);
                         }
                     }
-                } else if (player != null && player.isPassenger()) {
-                    player.stopRiding();
+                } else if (player != null) {
+                    player.failedMount = null;
+                    if (player.isPassenger()) player.stopRiding();
                 }
-            } else if (player != null && player.isPassenger()) {
-                player.stopRiding();
+            } else if (player != null) {
+                player.failedMount = null;
+                if (player.isPassenger()) player.stopRiding();
             }
 
             if (player != null) {
+                PoseStack.Pose checkpoint = poseStack.last();
                 poseStack.pushPose();
                 try {
                     dispatcher.render(player,
@@ -226,7 +267,7 @@ final class FarEntityRenderer {
                         throw new RuntimeException(throwable);
                     }
                 } finally {
-                    poseStack.popPose();
+                    restorePose(poseStack, checkpoint);
                 }
             }
         }
@@ -251,15 +292,19 @@ final class FarEntityRenderer {
         }
     }
 
+    private static void restorePose(PoseStack poseStack, PoseStack.Pose checkpoint) {
+        // 实体渲染器抛错时可能遗留push，恢复到本次绘制前的栈顶。
+        while (poseStack.last() != checkpoint) poseStack.popPose();
+    }
+
     private Entity getVehicleProxy(ClientLevel level, TrackedPlayer tracked) {
-        if (Objects.equals(this.failedVehicleRevisions.get(tracked.vehicleUuid()),
-                tracked.vehicleDataRevision())) {
-            return null;
-        }
+        VehicleRevision failed = this.failedVehicleRevisions.get(tracked.vehicleUuid());
+        if (failed != null && failed.matches(tracked)) return null;
         return this.vehicleProxies.compute(tracked.vehicleUuid(), (uuid, current) -> {
+            VehicleRevision revision = current == null ? null : this.vehicleProxyRevisions.get(uuid);
             if (current != null && current.level() == level
                     && tracked.vehicleTypeId().equals(typeId(current))
-                    && Objects.equals(this.vehicleProxyRevisions.get(uuid), tracked.vehicleDataRevision())) {
+                    && revision != null && revision.matches(tracked)) {
                 return current;
             }
             if (current != null) {
@@ -267,10 +312,11 @@ final class FarEntityRenderer {
             }
             Entity created = createVehicleProxy(level, tracked);
             if (created != null) {
-                this.vehicleProxyRevisions.put(uuid, tracked.vehicleDataRevision());
+                this.vehicleProxyRevisions.put(uuid, new VehicleRevision(tracked));
                 this.failedVehicleRevisions.remove(uuid);
             } else {
-                this.failedVehicleRevisions.put(uuid, tracked.vehicleDataRevision());
+                this.vehicleProxyRevisions.remove(uuid);
+                this.failedVehicleRevisions.put(uuid, new VehicleRevision(tracked));
             }
             return created;
         });
@@ -312,9 +358,10 @@ final class FarEntityRenderer {
     private void rejectVehicleProxy(TrackedPlayer tracked, PlayerProxy player,
                                     Entity vehicle, Throwable throwable) {
         FAR_MOUNT_ERRORS.increment();
-        this.failedVehicleRevisions.put(tracked.vehicleUuid(), tracked.vehicleDataRevision());
-        this.vehicleProxyRevisions.remove(tracked.vehicleUuid());
-        this.vehicleProxies.remove(tracked.vehicleUuid(), vehicle);
+        this.failedVehicleRevisions.put(tracked.vehicleUuid(), new VehicleRevision(tracked));
+        if (this.vehicleProxies.remove(tracked.vehicleUuid(), vehicle)) {
+            this.vehicleProxyRevisions.remove(tracked.vehicleUuid());
+        }
         vehicle.ejectPassengers();
         if (player != null && player.getVehicle() == vehicle) {
             player.stopRiding();
@@ -385,6 +432,9 @@ final class FarEntityRenderer {
         private String customName;
         private boolean customNameVisible;
         private int appliedGeneration = Integer.MIN_VALUE;
+        private Entity failedMount;
+        private int failedMountRevision;
+        private int nextMountAttemptTick;
 
         PlayerProxy(ClientLevel level, UUID uuid, String name) {
             super(level, new GameProfile(uuid, name));
@@ -393,6 +443,28 @@ final class FarEntityRenderer {
             this.noPhysics = true;
             this.setNoGravity(true);
             this.setInvisible(false);
+        }
+
+        void mountVehicle(Entity vehicle, boolean proxy, int revision, int tick) {
+            if (this.getVehicle() == vehicle) {
+                this.failedMount = null;
+                return;
+            }
+            if (this.failedMount == vehicle && this.failedMountRevision == revision
+                    && tick - this.nextMountAttemptTick < 0) return;
+            try {
+                if (this.isPassenger()) this.stopRiding();
+                // 快照已确认乘坐关系；代理NBT中的满座映射不能再次阻止该玩家挂载。
+                if (this.startRiding(vehicle, proxy)) {
+                    this.failedMount = null;
+                    return;
+                }
+            } catch (Throwable ignored) {
+            }
+            FAR_MOUNT_ERRORS.increment();
+            this.failedMount = vehicle;
+            this.failedMountRevision = revision;
+            this.nextMountAttemptTick = tick + 20;
         }
 
         void apply(TrackedPlayer tracked, double x, double y, double z, int maximumDistance,
@@ -463,11 +535,14 @@ final class FarEntityRenderer {
         }
 
         private void updateWalkAnimation(double x, double z, TrackedPlayer tracked, boolean animate, int tick) {
-            if (!this.hasLastWalkPosition || tick == this.lastWalkTick) {
+            if (!this.hasLastWalkPosition) {
                 this.lastWalkX = x;
                 this.lastWalkZ = z;
                 this.hasLastWalkPosition = true;
                 this.lastWalkTick = tick;
+                return;
+            }
+            if (tick == this.lastWalkTick) {
                 return;
             }
             this.lastWalkTick = tick;

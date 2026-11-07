@@ -9,12 +9,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(Minecraft.class)
 public class MixinMinecraft {
-    @Inject(method = "clearClientLevel", at = @At("HEAD"), require = 0)
+    @Inject(method = "clearClientLevel(Lnet/minecraft/client/gui/screens/Screen;)V", at = @At("HEAD"))
     private void voxy$beforeClientLevelIsDiscarded(CallbackInfo ci) {
         ClientSessionEvents.sessionEnd();
     }
 
-    @Inject(method = "disconnect", at = @At("TAIL"), require = 0)
+    // 所有退出重载汇入此处，暂停菜单不会经过无参 disconnect。
+    @Inject(method = "disconnect(Lnet/minecraft/client/gui/screens/Screen;Z)V", at = @At("TAIL"))
     private void voxy$afterDisconnect(CallbackInfo ci) {
         ClientSessionEvents.sessionEnd();
     }

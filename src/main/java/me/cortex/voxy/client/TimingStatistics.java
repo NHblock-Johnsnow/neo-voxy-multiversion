@@ -52,6 +52,10 @@ public class TimingStatistics {
             return this.rolling;
         }
 
+        public long getRuntimeNanos() {
+            return this.runtime;
+        }
+
         public String pVal() {
             return String.format("%6.3f", this.rolling);
         }

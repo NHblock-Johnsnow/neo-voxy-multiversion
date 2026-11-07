@@ -116,11 +116,15 @@ public final class ReuseVertexConsumer implements VertexConsumer {
          boolean transparent = false;
          int width = contents.width();
          int height = contents.height();
-         for (int y = 0; y < height && !transparent; y++) {
-            for (int x = 0; x < width; x++) {
-               if (contents.isTransparent(0, x, y)) {
-                  transparent = true;
-                  break;
+         var frames = contents.getUniqueFrames();
+         for (int frameIndex = 0; frameIndex < frames.size() && !transparent; frameIndex++) {
+            int frame = frames.getInt(frameIndex);
+            for (int y = 0; y < height && !transparent; y++) {
+               for (int x = 0; x < width; x++) {
+                  if (contents.isTransparent(frame, x, y)) {
+                     transparent = true;
+                     break;
+                  }
                }
             }
          }

@@ -3,8 +3,6 @@ plugins {
     id 'maven-publish'
 }
 
-def isInGHA = System.getenv("GITHUB_ACTIONS") == "true"
-
 version = project.mod_version
 group = project.maven_group
 
@@ -13,15 +11,6 @@ base {
 }
 
 repositories {
-    maven {
-        name = 'LocalBuildBootstrap'
-        url = uri('.gradle/bootstrap-maven')
-        metadataSources {
-            gradleMetadata()
-            mavenPom()
-            artifact()
-        }
-    }
     mavenCentral()
 
     exclusiveContent {
@@ -124,15 +113,6 @@ neoForge {
     parchment {
         minecraftVersion = project.minecraft_version
         mappingsVersion = "2024.11.17"
-    }
-}
-
-def modRuntimeOnlyMsk = {arg->}
-if (!isInGHA) {
-    modRuntimeOnlyMsk = { arg ->
-        dependencies {
-            modRuntimeOnly(arg)
-        }
     }
 }
 
@@ -343,92 +323,12 @@ java {
     //withSourcesJar()
 }
 
-sourceSets {
-    verification {
-        java.srcDir 'src/verification/java'
-        compileClasspath += sourceSets.main.output
-        compileClasspath += sourceSets.main.compileClasspath
-        runtimeClasspath += output + compileClasspath
-    }
-}
-
-configurations {
-    verificationImplementation.extendsFrom implementation
-    verificationRuntimeOnly.extendsFrom runtimeOnly
-}
-
-tasks.register('verifyWorldSectionPositions', JavaExec) {
-    group = 'verification'
-    description = 'Verifies legacy and extended world-section position encoding'
-    dependsOn tasks.named('verificationClasses')
-    classpath = sourceSets.verification.runtimeClasspath
-    mainClass = 'me.cortex.voxy.common.world.WorldSectionPositionVerification'
-}
-
-tasks.register('verifyTerrainMips', JavaExec) {
-    group = 'verification'
-    description = 'Verifies terrain occupancy, thin surfaces and mip boundaries'
-    dependsOn tasks.named('verificationClasses')
-    classpath = sourceSets.verification.runtimeClasspath
-    mainClass = 'me.cortex.voxy.common.world.TerrainMipperVerification'
-}
-
-tasks.named('check') {
-    dependsOn tasks.named('verifyWorldSectionPositions')
-    dependsOn tasks.named('verifyTerrainMips')
-}
-
-tasks.register('verifyLiveHandoff', JavaExec) {
-    group = 'verification'
-    description = 'Verifies frame-consistent distant-render handoff and reacquisition'
-    dependsOn tasks.named('verificationClasses')
-    classpath = sourceSets.verification.runtimeClasspath
-    mainClass = 'me.cortex.voxy.client.compat.LiveHandoffVerification'
-}
-
-tasks.named('check') {
-    dependsOn tasks.named('verifyLiveHandoff')
-}
-
-tasks.register('verifyRocksDBLifecycle', JavaExec) {
-    group = 'verification'
-    description = 'Verifies auxiliary-table access across RocksDB close and reopen'
-    dependsOn tasks.named('verificationClasses')
-    classpath = sourceSets.verification.runtimeClasspath
-    mainClass = 'me.cortex.voxy.common.config.storage.RocksDBLifecycleVerification'
-}
-
-tasks.named('check') {
-    dependsOn tasks.named('verifyRocksDBLifecycle')
-}
-
-tasks.register('verifyDistantMeshLod', JavaExec) {
-    group = 'verification'
-    description = 'Verifies mesh simplification, coverage and screen-space error bounds'
-    dependsOn tasks.named('verificationClasses')
-    classpath = sourceSets.verification.runtimeClasspath
-    mainClass = 'me.cortex.voxy.client.compat.create.DistantMeshLodVerification'
-}
-
-tasks.named('check') {
-    dependsOn tasks.named('verifyDistantMeshLod')
-}
-
-tasks.register('verifyDistantMeshGpu', JavaExec) {
-    group = 'verification'
-    description = 'Runs optional OpenGL 4.6 distant-mesh regression checks'
-    dependsOn tasks.named('verificationClasses')
-    classpath = sourceSets.verification.runtimeClasspath + sourceSets.main.runtimeClasspath
-    mainClass = 'me.cortex.voxy.client.compat.create.DistantMeshGpuVerification'
-}
 
 jar {
     // The full nested-dependency archive is only an input to slimJar. Keep it out of build/libs so
     // users and CI cannot accidentally publish the ~90 MiB intermediate.
     destinationDirectory.set(layout.buildDirectory.dir("intermediate-jars"))
-    from("LICENSE") {
-        rename { "${it}_${project.archives_base_name}"}
-    }
+    from("README.md")
 }
 
 // Build the distributable JAR without an external Python post-processing step. NeoForge requires
@@ -570,123 +470,6 @@ tasks.named('build') {
     dependsOn tasks.named('liteShaderPackOverlay')
 }
 
-def pythonExecutable = System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('windows') ? 'python' : 'python3'
-def pythonAvailable = providers.provider {
-    try {
-        providers.exec {
-            commandLine pythonExecutable, '--version'
-            ignoreExitValue = true
-        }.result.get().exitValue == 0
-    } catch (Exception ignored) {
-        false
-    }
-}
-
-// Validate mixin configuration (registration, exclusions, remap flags)
-task validateMixinConfig(type: Exec) {
-    description = 'Validates mixin registration, exclusions, and configuration'
-    group = 'verification'
-
-    commandLine pythonExecutable, 'scripts/validate_mixin_config.py'
-    environment 'PYTHONIOENCODING', 'utf-8'
-
-    // Only run if script exists
-    onlyIf {
-        file('scripts/validate_mixin_config.py').exists()
-    }
-}
-
-// Validate mixin target signatures before compilation
-task validateMixinSignatures(type: Exec) {
-    description = 'Validates @Inject/@Shadow targets against Minecraft source'
-    group = 'verification'
-
-    commandLine pythonExecutable, 'scripts/validate_mixin_targets.py'
-    environment 'PYTHONIOENCODING', 'utf-8'
-
-    onlyIf {
-        file('scripts/validate_mixin_targets.py').exists() && pythonAvailable.get()
-    }
-
-    // The validator skips unresolved optional targets; reported violations are definite failures.
-    ignoreExitValue = false
-}
-
-// Validate mixin configurations after JAR creation
-task validateMixins(type: Exec) {
-    dependsOn jar
-
-    description = 'Validates that all mixins declared in JSON configs are present in the JAR'
-    group = 'verification'
-
-    commandLine pythonExecutable, 'scripts/validate_mixins.py'
-    environment 'PYTHONIOENCODING', 'utf-8'
-
-    // Only run if script exists
-    onlyIf {
-        file('scripts/validate_mixins.py').exists()
-    }
-}
-
-// Run validations as part of build process
-compileJava.dependsOn validateMixinConfig       // Before compilation (config check)
-compileJava.dependsOn validateMixinSignatures   // Before compilation (signature check)
-build.dependsOn validateMixins                   // After JAR creation (content check)
-
-
-
-// NeoForge: makeExcludedRocksDB and processIncludeJars are Fabric Loom specific - removed
-/*
-tasks.register('makeExcludedRocksDB', Zip) {
-    archiveExtension.set("jar")
-    entryCompression = ZipEntryCompression.STORED
-    destinationDirectory.set temporaryDir
-
-    dependsOn configurations.includeInternal
-
-    def files = configurations.includeInternal.incoming.getArtifacts().getArtifactFiles().filter {
-        it.name.startsWith('rocksdb')
-    }
-
-    from {->zipTree(files.first())}
-    archiveFileName.set(providers.provider{files.first().name})
-
-    exclude {
-        def file = it.name
-        if (file.endsWith(".jnilib")) {
-            return true
-        }
-        if (!file.endsWith(".so")) {
-            return false
-        }
-        return ["osx", "linux32", "musl", "s390x", "riscv64", "ppc64le", "aarch64"].any(file::contains)
-    }
-}
-
-processIncludeJars {
-    outputs.cacheIf {true}
-
-    dependsOn makeExcludedRocksDB
-    jars = jars.filter {!it.name.startsWith('rocksdb')}
-    jars.from(makeExcludedRocksDB)
-}
-*/
-
-// NeoForge: remapJar is handled by NeoGradle automatically
-/*
-remapJar {
-    doFirst {
-        delete fileTree(getDestinationDirectory().get())
-    }
-
-    if (!isInGHA) {
-        def hash = gitCommitHash();
-        if (!hash.equals("<UnknownCommit>")) {
-            archiveClassifier.set(hash);
-        }
-    }
-}
-*/
 
 project.ext.lwjglVersion = "3.3.3"
 project.ext.lwjglNatives = "natives-windows"
@@ -807,8 +590,12 @@ dependencies {
             prefer '5.1.0'
         }
     }
-    // commons-pool2 is a transitive dependency of jedis
-    implementation 'org.apache.commons:commons-pool2:2.12.0'
+    jarJar(implementation('org.apache.commons:commons-pool2:2.12.0')) {
+        version {
+            strictly '[2.12.0, 3.0.0)'
+            prefer '2.12.0'
+        }
+    }
 
     // Distant Horizons import support
     jarJar(implementation('org.tukaani:xz:1.10')) {
@@ -825,19 +612,4 @@ dependencies {
     }
     //implementation 'org.rocksdb:rocksdbjni:8.10.0'
     //implementation 'redis.clients:jedis:5.1.0'
-}
-
-if (!isInGHA) {
-    repositories {
-        maven {
-            url = "https://pkgs.dev.azure.com/djtheredstoner/DevAuth/_packaging/public/maven/v1"
-        }
-    }
-
-    dependencies {
-        /*
-        modRuntimeOnly('me.djtheredstoner:DevAuth-fabric:1.2.1') {
-            exclude group: 'net.fabricmc', module: 'fabric-loader'
-        }*/
-    }
 }

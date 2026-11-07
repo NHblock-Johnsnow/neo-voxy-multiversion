@@ -86,12 +86,15 @@ public final class ReuseVertexConsumer implements VertexConsumer {
 
     @Override
     public ReuseVertexConsumer setColor(int red, int green, int blue, int alpha) {
-        return this.setColor(packAbgr(red, green, blue, alpha));
+        return this.writeAbgr(packAbgr(red, green, blue, alpha));
     }
 
     @Override
     public ReuseVertexConsumer setColor(int i) {
-        int colour = normalizeAbgr(i);
+        return this.writeAbgr((i & 0xFF00FF00) | ((i >>> 16) & 0xFF) | ((i & 0xFF) << 16));
+    }
+
+    private ReuseVertexConsumer writeAbgr(int colour) {
         if (this.vertexAlphaOnly) {
             colour = (colour & 0xFF000000) | 0x00FFFFFF;
         }
@@ -164,12 +167,12 @@ public final class ReuseVertexConsumer implements VertexConsumer {
         for (int i = 0; i < 4; i++) {
             // look at FaceBakery
             int j = i * 8;
-            int colour = normalizeAbgr(vertices[j + 3]);
+            int colour = vertices[j + 3];
             if (tintColour != -1) {
                 colour = multiplyAbgr(colour, tintColour);
             }
             this.addVertex(Float.intBitsToFloat(vertices[j]), Float.intBitsToFloat(vertices[j + 1]), Float.intBitsToFloat(vertices[j + 2]));
-            this.setColor(colour);
+            this.writeAbgr(colour);
             this.setUv(Float.intBitsToFloat(vertices[j + 4]), Float.intBitsToFloat(vertices[j + 5]));
 
             this.meta(metadata|this.globalOrMetadata);
@@ -271,13 +274,20 @@ public final class ReuseVertexConsumer implements VertexConsumer {
             return false;
         }
 
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                boolean transparent = hasFrameArgument
-                        ? (Boolean) alphaMethod.invoke(contents, 0, x, y)
-                        : (Boolean) alphaMethod.invoke(contents, x, y);
-                if (transparent) {
-                    return true;
+        Object uniqueFrames = hasFrameArgument ? voxy$invokeNoArg(contents, "getUniqueFrames") : null;
+        // 动画只检查实际使用的帧，非零起始帧也不能漏掉透明像素。
+        try (java.util.stream.IntStream frames = uniqueFrames instanceof java.util.stream.IntStream stream
+                ? stream : java.util.stream.IntStream.of(0)) {
+            var iterator = frames.iterator();
+            while (iterator.hasNext()) {
+                int frame = iterator.nextInt();
+                for (int y = 0; y < height; y++) {
+                    for (int x = 0; x < width; x++) {
+                        boolean transparent = hasFrameArgument
+                                ? (Boolean) alphaMethod.invoke(contents, frame, x, y)
+                                : (Boolean) alphaMethod.invoke(contents, x, y);
+                        if (transparent) return true;
+                    }
                 }
             }
         }
@@ -357,16 +367,6 @@ public final class ReuseVertexConsumer implements VertexConsumer {
         } catch (Throwable ignored) {
             return -1;
         }
-    }
-
-    private static int normalizeAbgr(int colour) {
-        if (colour == -1) {
-            return 0xFFFFFFFF;
-        }
-        if ((colour & 0xFF000000) == 0) {
-            colour |= 0xFF000000;
-        }
-        return colour;
     }
 
     private static int packAbgr(int red, int green, int blue, int alpha) {

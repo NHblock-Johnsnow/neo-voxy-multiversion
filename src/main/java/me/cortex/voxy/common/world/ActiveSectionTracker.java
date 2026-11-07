@@ -30,6 +30,7 @@ public class ActiveSectionTracker {
         public volatile int preAcquireCount;
         public volatile int postAcquireCount;
         public volatile T obj;
+        public volatile Throwable failure;
     }
 
     private final AtomicInteger loadedSections = new AtomicInteger();
@@ -67,33 +68,62 @@ public class ActiveSectionTracker {
         return this.acquire(WorldEngine.getWorldSectionId(lvl, x, y, z), nullOnEmpty);
     }
 
-    /** Cache-only acquire for render-thread callers; it never joins an in-flight load. */
+    /** 缓存专用获取：不触发加载，也不等待正在加载的 holder。 */
     public WorldSection acquireIfCached(long key) {
         int index = this.getCacheArrayIndex(key);
         var cache = this.loadedSectionCache[index];
-        final var lock = this.locks[index];
+        var lock = this.locks[index];
         long stamp = lock.readLock();
         try {
-            VolatileHolder<WorldSection> holder = cache.get(key);
+            var holder = cache.get(key);
             if (holder != null) {
-                WorldSection section = holder.obj;
-                if (section != null) {
-                    section.acquire();
-                    return section;
-                }
-                return null;
+                var section = holder.obj;
+                if (section != null) section.acquire();
+                return section;
             }
         } finally {
             lock.unlockRead(stamp);
         }
-        boolean inLru;
-        long lruStamp = this.lruLock.readLock();
+        // 与卸载保持 shard -> LRU 锁序，原子取回并发布，逐出后直接返回 null。
+        stamp = lock.writeLock();
         try {
-            inLru = this.lruSecondaryCache.containsKey(key);
+            var holder = cache.get(key);
+            if (holder != null) {
+                var section = holder.obj;
+                if (section != null) section.acquire();
+                return section;
+            }
+            WorldSection section;
+            long lruStamp = this.lruLock.writeLock();
+            try {
+                section = this.lruSecondaryCache.remove(key);
+            } finally {
+                this.lruLock.unlockWrite(lruStamp);
+            }
+            if (section == null) return null;
+            section.primeForReuse();
+            holder = new VolatileHolder<>();
+            holder.obj = section;
+            cache.put(key, holder);
+            this.loadedSections.incrementAndGet();
+            return section;
         } finally {
-            this.lruLock.unlockRead(lruStamp);
+            lock.unlockWrite(stamp);
         }
-        return inLru ? this.acquire(key, true) : null;
+    }
+
+    /** 只借用仍由当前 holder 发布的脏区段，不加载或复活旧缓存对象。 */
+    WorldSection acquireForSaveRetry(WorldSection candidate) {
+        int index = this.getCacheArrayIndex(candidate.key);
+        var lock = this.locks[index];
+        long stamp = lock.readLock();
+        try {
+            var holder = this.loadedSectionCache[index].get(candidate.key);
+            return holder != null && holder.obj == candidate && candidate.shouldSave()
+                    && candidate.tryAcquire() ? candidate : null;
+        } finally {
+            lock.unlockRead(stamp);
+        }
     }
 
     public WorldSection acquire(long key, boolean nullOnEmpty) {
@@ -144,97 +174,102 @@ public class ActiveSectionTracker {
             }
         }
 
-        if (isLoader) {
-            this.loadedSections.incrementAndGet();
-            WorldSection removal = null;
-            long stamp2 = lock.readLock();
+        if (!isLoader) {
+            VolatileHolder.PRE_ACQUIRE_COUNT.getAndAdd(holder, 1);
+            boolean interrupted = false;
             try {
-                long stamp = this.lruLock.writeLock();
-                try {
-                    section = this.lruSecondaryCache.remove(key);
-
-                    if (section == null && (!this.lruSecondaryCache.isEmpty()) && this.lruSize+100<this.lruSecondaryCache.size()+this.getLoadedCacheCount()) {//Add a self clamping lru case for when there are alot of loaded sections
-                        removal = this.lruSecondaryCache.removeFirst();
+                // 等待发布结果，不占用 CPU；失败也必须唤醒所有等待者。
+                synchronized (holder) {
+                    while (holder.obj == null && holder.failure == null) {
+                        try {
+                            holder.wait();
+                        } catch (InterruptedException ignored) {
+                            interrupted = true;
+                        }
                     }
-                } finally {
-                    this.lruLock.unlockWrite(stamp);
-                }
-                if (section != null) {
-                    section.primeForReuse();
-                    section.acquire(1);
                 }
             } finally {
-                //Guard against leaking the shard read lock if section.acquire() throws.
-                lock.unlockRead(stamp2);
+                if (interrupted) Thread.currentThread().interrupt();
             }
-
-            if (removal != null) {
-                removal._releaseArray();
+            if (holder.failure != null) {
+                if (holder.failure instanceof Error error) throw error;
+                throw (RuntimeException) holder.failure;
             }
-        } else {
-            VolatileHolder.PRE_ACQUIRE_COUNT.getAndAdd(holder, 1);
+            section = holder.obj;
+            if ((int) VolatileHolder.POST_ACQUIRE_COUNT.getAndAdd(holder, -1) > 0) {
+                return section;
+            }
+            // 迟到等待者须核对 holder 身份，避免拿到下一轮尚未发布的 LRU 复用对象。
+            long stamp = lock.readLock();
+            try {
+                if (cache.get(key) == holder && section.tryAcquire()) return section;
+            } finally {
+                lock.unlockRead(stamp);
+            }
+            return this.acquire(key, nullOnEmpty);
         }
 
-        //If this thread was the one to create the reference then its the thread to load the section
-        if (isLoader) {
+        this.loadedSections.incrementAndGet();
+        try {
+            WorldSection removal = null;
+            long lruStamp = this.lruLock.writeLock();
+            try {
+                section = this.lruSecondaryCache.remove(key);
+                if (section == null && !this.lruSecondaryCache.isEmpty()
+                        && this.lruSize + 100 < this.lruSecondaryCache.size() + this.getLoadedCacheCount()) {
+                    removal = this.lruSecondaryCache.removeFirst();
+                }
+            } finally {
+                this.lruLock.unlockWrite(lruStamp);
+            }
+            if (removal != null) removal._releaseArray();
+
             int status = 0;
-            if (section == null) {//Secondary cache miss
-                section = new WorldSection(WorldEngine.getLevel(key),
-                        WorldEngine.getX(key),
-                        WorldEngine.getY(key),
-                        WorldEngine.getZ(key),
-                        this);
-
+            if (section != null) {
+                section.primeForReuse();
+            } else {
+                section = new WorldSection(WorldEngine.getLevel(key), WorldEngine.getX(key),
+                        WorldEngine.getY(key), WorldEngine.getZ(key), this);
                 status = this.loader.load(section);
-
                 if (status < 0) {
                     Logger.error("Unable to load section " + section.key + " setting to air");
                     status = 1;
                 }
-
                 if (status == 1) {
-                    int sky = 15;
-                    int block = 0;
-                    section.setUniform(Mapper.composeMappingId((byte) (sky|(block<<4)),0,0));
+                    section.setUniform(Mapper.composeMappingId((byte) 15, 0, 0));
                     me.cortex.voxy.commonImpl.PerfStats.sectionUniformKept.increment();
                 }
                 section.acquire(1);
             }
             int preAcquireCount = (int) VolatileHolder.PRE_ACQUIRE_COUNT.getAndSet(holder, 0);
-            section.acquire(preAcquireCount);//pre acquire amount
+            section.acquire(preAcquireCount);
             VolatileHolder.POST_ACQUIRE_COUNT.set(holder, preAcquireCount);
-
-
-            VarHandle.storeStoreFence();//Do not reorder setting this object
-            holder.obj = section;
-            VarHandle.releaseFence();
-            if (nullOnEmpty && status == 1) {//If its air return null as stated, release the section aswell
+            synchronized (holder) {
+                holder.obj = section;
+                holder.notifyAll();
+            }
+            if (nullOnEmpty && status == 1) {
                 section.release();
                 return null;
             }
             return section;
-        } else {
-            VarHandle.fullFence();
-            while ((section = holder.obj) == null) {
-                VarHandle.fullFence();
-                Thread.onSpinWait();
-                Thread.yield();
-            }
-
-            //Try to acquire a pre lock
-            if (0<((int)VolatileHolder.POST_ACQUIRE_COUNT.getAndAdd(holder, -1))) {
-                //We managed to acquire one of the pre locks, so just return the section
-                return section;
-            } else {
-                {//Dont think need to lock here
-                    if (section.tryAcquire()) {
-                        return section;
+        } catch (RuntimeException | Error failure) {
+            // 仅移除本次未发布的 holder，允许后续调用重新加载。
+            if (holder.obj == null) {
+                long stamp = lock.writeLock();
+                try {
+                    cache.remove(key, holder);
+                    this.loadedSections.decrementAndGet();
+                    synchronized (holder) {
+                        holder.failure = failure;
+                        holder.notifyAll();
                     }
+                } finally {
+                    lock.unlockWrite(stamp);
                 }
-
-                //We failed everything, try get it again
-                return this.acquire(key, nullOnEmpty);
+                if (section != null) section._releaseArray();
             }
+            throw failure;
         }
     }
 
@@ -373,45 +408,5 @@ public class ActiveSectionTracker {
         return this.lruSecondaryCache.size();
     }
 
-    public static void main(String[] args) throws InterruptedException {
-        var tracker = new ActiveSectionTracker(6, a->0, 2<<10);
-        var bean = tracker.acquire(0, 0, 0, 9, false);
-        var bean2 = tracker.acquire(1, 0, 0, 0, false);
-        System.out.println("Target obj:" + System.identityHashCode(bean2));
-        bean2.release();
-        Thread[] ts = new Thread[10];
-        for (int i = 0; i < ts.length;i++) {
-            int tid = i;
-            ts[i] = new Thread(()->{
-                try {
-                    for (int j = 0; j < 5000; j++) {
-                        if (true) {
-                            var section = tracker.acquire(0, 0, 0, 0, false);
-                            section.acquire();
-                            var section2 = tracker.acquire(1, 0, 0, 0, false);
-                            section.release();
-                            section.release();
-                            section2.release();
-                        }
-                        if (true) {
 
-                            var section = tracker.acquire(0, 0, 0, 0, false);
-                            var section2 = tracker.acquire(1, 0, 0, 0, false);
-                            section2.release();
-                            section.release();
-                        }
-                        if (true) {
-                            tracker.acquire(1, 0, 0, 0, false).release();
-                        }
-                    }
-                } catch (Exception e) {
-                    throw new RuntimeException("Thread " + tid, e);
-                }
-            });
-            ts[i].start();
-        }
-        for (var t : ts) {
-            t.join();
-        }
-    }
 }

@@ -46,7 +46,7 @@ public class MixinFogRenderer {
         // Adjust sky fog so it always looks smooth and doesn't change with render distance
         if (fogMode == FogMode.FOG_SKY) {
             RenderSystem.setShaderFogStart(0);
-            RenderSystem.setShaderFogEnd(VoxyConfig.CONFIG.skyFogDistance);
+            RenderSystem.setShaderFogEnd(VoxyConfig.CONFIG.skyFogDistance * 16.0f);
         }
 
         if (fogMode == FogMode.FOG_TERRAIN) {

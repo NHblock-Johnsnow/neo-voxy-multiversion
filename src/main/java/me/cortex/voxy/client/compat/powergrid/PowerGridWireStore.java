@@ -17,8 +17,8 @@ final class PowerGridWireStore {
 
     private PowerGridWireStore() {}
 
-    static void save(SectionStorage storage, UUID id, PowerGridWireRenderer.Source source) {
-        if (storage == null || !storage.supportsAuxTable(TABLE)) return;
+    static boolean save(SectionStorage storage, UUID id, PowerGridWireRenderer.Source source) {
+        if (storage == null || !storage.supportsAuxTable(TABLE)) return false;
         try {
             var bytes = new ByteArrayOutputStream(128);
             var out = new DataOutputStream(bytes);
@@ -36,8 +36,10 @@ final class PowerGridWireStore {
             if (points != null) for (double point : points) out.writeDouble(point);
             out.flush();
             storage.putAux(TABLE, key(id), bytes.toByteArray());
+            return true;
         } catch (Throwable t) {
             Logger.error("Storing PowerGrid wire LOD " + id, t);
+            return false;
         }
     }
 

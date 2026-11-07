@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core;
 
+import me.cortex.voxy.common.util.ExceptionCleanup;
+
 import java.util.List;
 import java.util.function.BooleanSupplier;
 import me.cortex.voxy.client.core.gl.GlBuffer;
@@ -24,7 +26,7 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
    private static final int BASE_SAMPLER_BINDING_INDEX = 6;
    private final IrisVoxyRenderPipelineData data;
    private final FullscreenBlit depthBlit;
-   public final DepthFramebuffer fbTranslucent = new DepthFramebuffer(this.fb.getFormat());
+   public final DepthFramebuffer fbTranslucent;
    private final FullscreenBlit shaderDepthHackFixTransformBlit;
    private final GlBuffer shaderUniforms;
 
@@ -37,46 +39,52 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
       BooleanSupplier frexSupplier
    ) {
       super(properties, nodeManager, nodeCleaner, traversal, frexSupplier, data.shouldDeferTranslucency());
-      this.data = data;
-      if (this.data.thePipeline != null) {
-         throw new IllegalStateException("Pipeline data already bound");
-      } else {
-         this.data.thePipeline = this;
-         int[] oDT = this.data.opaqueDrawTargets;
-         int[] binding = new int[oDT.length];
+        try {
+            this.fbTranslucent = new DepthFramebuffer(this.fb.getFormat());
+            this.data = data;
+            if (this.data.thePipeline != null) {
+               throw new IllegalStateException("Pipeline data already bound");
+            } else {
+               this.data.thePipeline = this;
+               int[] oDT = this.data.opaqueDrawTargets;
+               int[] binding = new int[oDT.length];
 
-         for (int i = 0; i < oDT.length; i++) {
-            binding[i] = 36064 + i;
-            GL45C.glNamedFramebufferTexture(this.fb.framebuffer.id, 36064 + i, oDT[i], 0);
-         }
+               for (int i = 0; i < oDT.length; i++) {
+                  binding[i] = 36064 + i;
+                  GL45C.glNamedFramebufferTexture(this.fb.framebuffer.id, 36064 + i, oDT[i], 0);
+               }
 
-         GL45C.glNamedFramebufferDrawBuffers(this.fb.framebuffer.id, binding);
-         int[] tDT = this.data.translucentDrawTargets;
-         binding = new int[tDT.length];
+               GL45C.glNamedFramebufferDrawBuffers(this.fb.framebuffer.id, binding);
+               int[] tDT = this.data.translucentDrawTargets;
+               binding = new int[tDT.length];
 
-         for (int i = 0; i < tDT.length; i++) {
-            binding[i] = 36064 + i;
-            GL45C.glNamedFramebufferTexture(this.fbTranslucent.framebuffer.id, 36064 + i, tDT[i], 0);
-         }
+               for (int i = 0; i < tDT.length; i++) {
+                  binding[i] = 36064 + i;
+                  GL45C.glNamedFramebufferTexture(this.fbTranslucent.framebuffer.id, 36064 + i, tDT[i], 0);
+               }
 
-         GL45C.glNamedFramebufferDrawBuffers(this.fbTranslucent.framebuffer.id, binding);
-         this.fb.framebuffer.verify();
-         this.fbTranslucent.framebuffer.verify();
-         if (data.getUniforms() != null) {
-            this.shaderUniforms = new GlBuffer(data.getUniforms().size());
-         } else {
-            this.shaderUniforms = null;
-         }
+               GL45C.glNamedFramebufferDrawBuffers(this.fbTranslucent.framebuffer.id, binding);
+               this.fb.framebuffer.verify();
+               this.fbTranslucent.framebuffer.verify();
+               if (data.getUniforms() != null) {
+                  this.shaderUniforms = new GlBuffer(data.getUniforms().size());
+               } else {
+                  this.shaderUniforms = null;
+               }
 
-         if (!this.data.skipShaderDepthHackFix) {
-            this.shaderDepthHackFixTransformBlit = new FullscreenBlit(properties, "voxy:post/fullscreen2.vert", "voxy:post/noop.frag");
-         } else {
-            this.shaderDepthHackFixTransformBlit = null;
-         }
+               if (!this.data.skipShaderDepthHackFix) {
+                  this.shaderDepthHackFixTransformBlit = new FullscreenBlit(properties, "voxy:post/fullscreen2.vert", "voxy:post/noop.frag");
+               } else {
+                  this.shaderDepthHackFixTransformBlit = null;
+               }
 
-         this.depthBlit = new FullscreenBlit(properties, "voxy:post/blit_texture_depth_cutout.frag");
-      }
-   }
+               this.depthBlit = new FullscreenBlit(properties, "voxy:post/blit_texture_depth_cutout.frag");
+            }
+        } catch (RuntimeException | Error failure) {
+            this.releaseResources(new ExceptionCleanup(failure));
+            throw failure;
+        }
+    }
 
    @Override
    public void setupExtraModelBakeryData(ModelBakerySubsystem modelService) {
@@ -85,23 +93,20 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
 
    @Override
    public void free() {
-      if (this.data.thePipeline != this) {
-         throw new IllegalStateException();
-      } else {
-         this.data.thePipeline = null;
-         this.depthBlit.delete();
-         this.fbTranslucent.free();
-         if (this.shaderDepthHackFixTransformBlit != null) {
-            this.shaderDepthHackFixTransformBlit.delete();
-         }
+        this.assertNotFreed();
+        var cleanup = new ExceptionCleanup(null);
+        this.releaseResources(cleanup);
+        cleanup.rethrow();
+    }
 
-         if (this.shaderUniforms != null) {
-            this.shaderUniforms.free();
-         }
-
-         super.free0();
-      }
-   }
+    private void releaseResources(ExceptionCleanup cleanup) {
+        if (this.data != null && this.data.thePipeline == this) this.data.thePipeline = null;
+        if (this.depthBlit != null) cleanup.run(this.depthBlit::delete);
+        if (this.shaderDepthHackFixTransformBlit != null) cleanup.run(this.shaderDepthHackFixTransformBlit::delete);
+        if (this.shaderUniforms != null) cleanup.run(this.shaderUniforms::free);
+        if (this.fbTranslucent != null) cleanup.run(this.fbTranslucent::free);
+        cleanup.run(super::free0);
+    }
 
    @Override
    public void preSetup(Viewport<?> viewport) {

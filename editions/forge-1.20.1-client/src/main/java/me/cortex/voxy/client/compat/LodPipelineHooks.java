@@ -13,10 +13,15 @@ import static org.lwjgl.opengl.GL13C.*;
 import static org.lwjgl.opengl.GL14C.*;
 import static org.lwjgl.opengl.GL20C.*;
 import static org.lwjgl.opengl.GL30C.GL_VERTEX_ARRAY_BINDING;
+import static org.lwjgl.opengl.GL30C.glGetIntegeri;
+import static org.lwjgl.opengl.GL33C.GL_SAMPLER_BINDING;
+import static org.lwjgl.opengl.GL33C.glBindSampler;
 
 public final class LodPipelineHooks {
     public interface Renderer {
         void render(AbstractRenderPipeline pipeline, Viewport<?> viewport, int depthFunc);
+
+        default void onResourceReload() {}
     }
 
     private static final List<Renderer> RENDERERS = new CopyOnWriteArrayList<>();
@@ -26,6 +31,16 @@ public final class LodPipelineHooks {
 
     public static void register(Renderer renderer) {
         RENDERERS.add(renderer);
+    }
+
+    public static void onResourceReload() {
+        for (Renderer renderer : RENDERERS) {
+            try {
+                renderer.onResourceReload();
+            } catch (Throwable error) {
+                Logger.error("LOD compatibility resource invalidation failed", error);
+            }
+        }
     }
 
     public static void beforeTranslucent(AbstractRenderPipeline pipeline, Viewport<?> viewport, int depthFunc) {
@@ -48,10 +63,12 @@ public final class LodPipelineHooks {
         int program = glGetInteger(GL_CURRENT_PROGRAM);
         int vao = glGetInteger(GL_VERTEX_ARRAY_BINDING);
         int activeTexture = glGetInteger(GL_ACTIVE_TEXTURE);
-        int[] textures = new int[2];
-        for (int unit = 0; unit < textures.length; unit++) {
+        long[] bindings = new long[2];
+        for (int unit = 0; unit < bindings.length; unit++) {
             glActiveTexture(GL_TEXTURE0 + unit);
-            textures[unit] = glGetInteger(GL_TEXTURE_BINDING_2D);
+            // 一个槽保存纹理和 sampler，避免额外分配数组。
+            bindings[unit] = Integer.toUnsignedLong(glGetInteger(GL_TEXTURE_BINDING_2D))
+                    | ((long) glGetIntegeri(GL_SAMPLER_BINDING, unit) << 32);
         }
         glActiveTexture(activeTexture);
         boolean depthTest = glIsEnabled(GL_DEPTH_TEST);
@@ -66,9 +83,10 @@ public final class LodPipelineHooks {
         try {
             body.run();
         } finally {
-            for (int unit = 0; unit < textures.length; unit++) {
+            for (int unit = 0; unit < bindings.length; unit++) {
                 glActiveTexture(GL_TEXTURE0 + unit);
-                glBindTexture(GL_TEXTURE_2D, textures[unit]);
+                glBindTexture(GL_TEXTURE_2D, (int) bindings[unit]);
+                glBindSampler(unit, (int) (bindings[unit] >>> 32));
             }
             glActiveTexture(activeTexture);
             GlStateManager._glUseProgram(program);

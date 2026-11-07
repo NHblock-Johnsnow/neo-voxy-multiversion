@@ -2,15 +2,16 @@ package me.cortex.voxy.commonImpl.compat.sable;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.electronwill.nightconfig.toml.TomlParser;
 import me.cortex.voxy.common.Logger;
 import net.minecraft.server.level.ServerLevel;
 import net.neoforged.fml.loading.FMLPaths;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.Reader;
+import java.io.StringReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Objects;
 
 public final class SableContraptionRenderDistance {
     private static final Path CONFIG_PATH = FMLPaths.CONFIGDIR.get().resolve("voxy-config.json");
@@ -22,14 +23,17 @@ public final class SableContraptionRenderDistance {
     private static final int DEFAULT_MAX_CHUNKS = 0;
     private static final double DEDICATED_SERVER_FALLBACK_BLOCKS = 2048.0;
 
-    private static final ConfigSnapshot DISABLED_CONFIG = new ConfigSnapshot(false, 0.0, DEFAULT_MAX_CHUNKS, Long.MIN_VALUE);
+    private static final ConfigSnapshot DISABLED_CONFIG = new ConfigSnapshot(false, 0.0, DEFAULT_MAX_CHUNKS);
 
     private static ConfigSnapshot cachedConfig = DISABLED_CONFIG;
     private static volatile ConfigSnapshot runtimeClientConfig;
-    private static long nextConfigRefreshTick;
+    private static long lastConfigRefreshTick = Long.MIN_VALUE;
+    private static String cachedConfigSource;
+    private static boolean configLoaded;
     private static double cachedDedicatedServerRangeBlocks = DEDICATED_SERVER_FALLBACK_BLOCKS;
-    private static long cachedDedicatedServerConfigLastModified = Long.MIN_VALUE;
-    private static long nextDedicatedServerConfigRefreshTick;
+    private static String cachedDedicatedServerConfigSource;
+    private static boolean dedicatedServerConfigLoaded;
+    private static long lastDedicatedServerConfigRefreshTick = Long.MIN_VALUE;
 
     private SableContraptionRenderDistance() {
     }
@@ -58,7 +62,7 @@ public final class SableContraptionRenderDistance {
 
     public static int resolveRenderDistanceChunks(int vanillaRenderDistanceChunks, double sectionRenderDistance, int aeronauticsContraptionMaxChunks) {
         int vanillaDistanceChunks = Math.max(0, vanillaRenderDistanceChunks);
-        if (sectionRenderDistance <= 0.0) {
+        if (!Double.isFinite(sectionRenderDistance) || sectionRenderDistance <= 0.0) {
             return vanillaDistanceChunks;
         }
 
@@ -73,62 +77,46 @@ public final class SableContraptionRenderDistance {
     }
 
     public static void updateClientConfig(boolean enabled, double sectionRenderDistance, int aeronauticsContraptionMaxChunks) {
-        if (!enabled || sectionRenderDistance <= 0.0) {
-            runtimeClientConfig = new ConfigSnapshot(false, 0.0, aeronauticsContraptionMaxChunks, Long.MAX_VALUE);
+        if (!enabled || !Double.isFinite(sectionRenderDistance) || sectionRenderDistance <= 0.0) {
+            runtimeClientConfig = new ConfigSnapshot(false, 0.0, aeronauticsContraptionMaxChunks);
             return;
         }
 
-        runtimeClientConfig = new ConfigSnapshot(true, sectionRenderDistance, aeronauticsContraptionMaxChunks, Long.MAX_VALUE);
+        runtimeClientConfig = new ConfigSnapshot(true, sectionRenderDistance, aeronauticsContraptionMaxChunks);
     }
 
     private static double getDedicatedServerRangeBlocks(long gameTime) {
-        if (gameTime < nextDedicatedServerConfigRefreshTick) {
+        if (lastDedicatedServerConfigRefreshTick != Long.MIN_VALUE
+                && gameTime >= lastDedicatedServerConfigRefreshTick
+                && gameTime - lastDedicatedServerConfigRefreshTick < CONFIG_REFRESH_TICKS) {
             return cachedDedicatedServerRangeBlocks;
         }
-        nextDedicatedServerConfigRefreshTick = gameTime + CONFIG_REFRESH_TICKS;
+        lastDedicatedServerConfigRefreshTick = gameTime;
 
-        long lastModified;
         try {
-            lastModified = Files.exists(SABLE_COMMON_CONFIG_PATH) ? Files.getLastModifiedTime(SABLE_COMMON_CONFIG_PATH).toMillis() : Long.MIN_VALUE;
+            String source = Files.exists(SABLE_COMMON_CONFIG_PATH) ? Files.readString(SABLE_COMMON_CONFIG_PATH) : null;
+            if (!dedicatedServerConfigLoaded || !Objects.equals(cachedDedicatedServerConfigSource, source)) {
+                cachedDedicatedServerRangeBlocks = loadDedicatedServerRangeBlocks(source);
+                cachedDedicatedServerConfigSource = source;
+                dedicatedServerConfigLoaded = true;
+            }
         } catch (IOException e) {
             return DEDICATED_SERVER_FALLBACK_BLOCKS;
         }
-
-        if (cachedDedicatedServerConfigLastModified == lastModified) {
-            return cachedDedicatedServerRangeBlocks;
-        }
-
-        cachedDedicatedServerConfigLastModified = lastModified;
-        cachedDedicatedServerRangeBlocks = loadDedicatedServerRangeBlocks();
         return cachedDedicatedServerRangeBlocks;
     }
 
-    private static double loadDedicatedServerRangeBlocks() {
-        if (!Files.exists(SABLE_COMMON_CONFIG_PATH)) {
+    private static double loadDedicatedServerRangeBlocks(String source) {
+        if (source == null) {
             return DEDICATED_SERVER_FALLBACK_BLOCKS;
         }
 
-        try (BufferedReader reader = Files.newBufferedReader(SABLE_COMMON_CONFIG_PATH)) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                int commentStart = line.indexOf('#');
-                if (commentStart >= 0) {
-                    line = line.substring(0, commentStart);
-                }
-
-                line = line.trim();
-                if (!line.startsWith("sub_level_tracking_range")) {
-                    continue;
-                }
-
-                int assignment = line.indexOf('=');
-                if (assignment < 0) {
-                    continue;
-                }
-
-                return Math.max(0.0, Double.parseDouble(line.substring(assignment + 1).trim()));
+        try {
+            Object value = new TomlParser().parse(new StringReader(source)).get("sub_level_tracking_range");
+            if (value instanceof Number number && Double.isFinite(number.doubleValue())) {
+                return Math.max(0.0, number.doubleValue());
             }
-        } catch (IOException | RuntimeException e) {
+        } catch (RuntimeException e) {
             Logger.error("Failed to load Sable sub_level_tracking_range for Voxy Sable LOD compatibility", e);
         }
 
@@ -136,43 +124,44 @@ public final class SableContraptionRenderDistance {
     }
 
     private static ConfigSnapshot getConfig(long gameTime) {
-        if (gameTime < nextConfigRefreshTick) {
+        if (lastConfigRefreshTick != Long.MIN_VALUE && gameTime >= lastConfigRefreshTick
+                && gameTime - lastConfigRefreshTick < CONFIG_REFRESH_TICKS) {
             return cachedConfig;
         }
-        nextConfigRefreshTick = gameTime + CONFIG_REFRESH_TICKS;
+        lastConfigRefreshTick = gameTime;
 
-        long lastModified;
         try {
-            lastModified = Files.exists(CONFIG_PATH) ? Files.getLastModifiedTime(CONFIG_PATH).toMillis() : Long.MIN_VALUE;
+            // 每秒读取一次小配置，仅内容改变时解析；保留 mtime 的外部编辑也能生效。
+            String source = Files.exists(CONFIG_PATH) ? Files.readString(CONFIG_PATH) : null;
+            if (!configLoaded || !Objects.equals(cachedConfigSource, source)) {
+                cachedConfig = loadConfig(source);
+                cachedConfigSource = source;
+                configLoaded = true;
+            }
         } catch (IOException e) {
             Logger.error("Failed to stat Voxy config for Sable simulated contraption render distance", e);
             return cachedConfig;
         }
-
-        if (cachedConfig.lastModifiedMillis() == lastModified) {
-            return cachedConfig;
-        }
-
-        cachedConfig = loadConfig(lastModified);
         return cachedConfig;
     }
 
-    private static ConfigSnapshot loadConfig(long lastModified) {
-        if (!Files.exists(CONFIG_PATH)) {
-            return new ConfigSnapshot(true, DEFAULT_SECTION_RENDER_DISTANCE, DEFAULT_MAX_CHUNKS, lastModified);
+    private static ConfigSnapshot loadConfig(String source) {
+        if (source == null) {
+            return new ConfigSnapshot(true, DEFAULT_SECTION_RENDER_DISTANCE, DEFAULT_MAX_CHUNKS);
         }
 
-        try (Reader reader = Files.newBufferedReader(CONFIG_PATH)) {
-            JsonObject root = JsonParser.parseReader(reader).getAsJsonObject();
-            boolean enabled = getBoolean(root, "enabled", true) && getBoolean(root, "enable_rendering", true);
+        try {
+            JsonObject root = JsonParser.parseString(source).getAsJsonObject();
+            boolean enabled = getBoolean(root, "enabled", true) && getBoolean(root, "enable_rendering", true)
+                    && getBoolean(root, "sable_lod_rendering", true);
             double sectionRenderDistance = getDouble(root, "section_render_distance", DEFAULT_SECTION_RENDER_DISTANCE);
             int aeronauticsContraptionMaxChunks = getInt(root, "aeronautics_contraption_max_chunks", DEFAULT_MAX_CHUNKS);
 
-            if (!enabled || sectionRenderDistance <= 0.0) {
-                return new ConfigSnapshot(false, 0.0, aeronauticsContraptionMaxChunks, lastModified);
+            if (!enabled || !Double.isFinite(sectionRenderDistance) || sectionRenderDistance <= 0.0) {
+                return new ConfigSnapshot(false, 0.0, aeronauticsContraptionMaxChunks);
             }
 
-            return new ConfigSnapshot(true, sectionRenderDistance, aeronauticsContraptionMaxChunks, lastModified);
+            return new ConfigSnapshot(true, sectionRenderDistance, aeronauticsContraptionMaxChunks);
         } catch (Exception e) {
             Logger.error("Failed to load Voxy config for Sable simulated contraption render distance", e);
             return DISABLED_CONFIG;
@@ -203,8 +192,7 @@ public final class SableContraptionRenderDistance {
     private record ConfigSnapshot(
             boolean enabled,
             double sectionRenderDistance,
-            int aeronauticsContraptionMaxChunks,
-            long lastModifiedMillis
+            int aeronauticsContraptionMaxChunks
     ) {
     }
 }

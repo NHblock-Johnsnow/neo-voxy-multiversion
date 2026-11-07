@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core.rendering.section.backend.mdic;
 
+import me.cortex.voxy.common.util.ExceptionCleanup;
+
 
 import me.cortex.voxy.client.RenderStatistics;
 import me.cortex.voxy.client.VoxyClient;
@@ -61,45 +63,22 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
     private final boolean opaqueNearFirst = VoxyConfig.CONFIG.experimentalOpaqueNearFirst;
     private final boolean chunkMaskHalfRes = VoxyConfig.CONFIG.experimentalChunkMaskHalfRes;
-    private final Shader commandGenShader = Shader.make()
-            .define("TRANSLUCENT_WRITE_BASE", 1024)
-            .defineIf("OPAQUE_NEAR_FIRST", this.opaqueNearFirst)
-            .define("TEMPORAL_OFFSET", TEMPORAL_OFFSET)
+    private final Shader commandGenShader;
 
-            .define("TRANSLUCENT_DISTANCE_BUFFER_BINDING", 7)
-
-            .defineIf("HAS_STATISTICS", RenderStatistics.enabled)
-            .defineIf("STATISTICS_BUFFER_BINDING", RenderStatistics.enabled, STATISTICS_BUFFER_BINDING)
-
-            .add(ShaderType.COMPUTE, "voxy:lod/gl46/cmdgen.comp")
-            .compile();
-
-    private final Shader prepShader = Shader.make()
-            .add(ShaderType.COMPUTE, "voxy:lod/gl46/prep.comp")
-            .compile();
+    private final Shader prepShader;
 
     private final Shader cullShader;
 
-    private final Shader prefixSumShader = Shader.make()
-            .add(ShaderType.COMPUTE, Capabilities.INSTANCE.subgroup?"voxy:util/prefixsum/inital3.comp":"voxy:util/prefixsum/simple.comp")
-            .define("IO_BUFFER", 0)
-            .compile();
+    private final Shader prefixSumShader;
 
-    private final Shader translucentGenShader = Shader.make()
-            .add(ShaderType.COMPUTE, "voxy:lod/gl46/buildtranslucents.comp")
-            .define("TRANSLUCENT_WRITE_BASE", 1024)
-            .defineIf("OPAQUE_NEAR_FIRST", this.opaqueNearFirst)
-            .define("TRANSLUCENT_DISTANCE_BUFFER_BINDING", 5)
-            .define("TRANSLUCENT_OFFSET", TRANSLUCENT_OFFSET)
+    private final Shader translucentGenShader;
 
-            .compile();
+    private final GlBuffer uniform;
 
-    private final GlBuffer uniform = new GlBuffer(1024).zero();
-
-    private final GlBuffer distanceCountBuffer = new GlBuffer(1024*4+TRANSLUCENT_DRAW_COUNT*4).zero();
+    private final GlBuffer distanceCountBuffer;
 
     // 调试统计缓冲只在统计开关打开时读取，仍预留固定大小以保持 shader ABI。
-    private final GlBuffer statisticsBuffer = new GlBuffer(1024).zero();
+    private final GlBuffer statisticsBuffer;
 
     private final AbstractRenderPipeline pipeline;
     private final float fluidDatumY;
@@ -107,53 +86,88 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
     public MDICSectionRenderer(AbstractRenderPipeline pipeline, ModelStore modelStore, BasicSectionGeometryData geometryData) {
         super(pipeline.properties, modelStore, geometryData);
-        this.pipeline = pipeline;
-        var level = Minecraft.getInstance().level;
-        this.fluidDatumY = level == null ? -1.0e9f : level.getSeaLevel() - (7.0f / 64.0f);
+        try {
+            this.commandGenShader = Shader.make()
+                    .define("TRANSLUCENT_WRITE_BASE", 1024)
+                    .defineIf("OPAQUE_NEAR_FIRST", this.opaqueNearFirst)
+                    .define("TEMPORAL_OFFSET", TEMPORAL_OFFSET)
 
-        // 管线可以在 shader 构建阶段注入 TAA、雾效和光影兼容代码。
-        String vertex = ShaderLoader.parse("voxy:lod/gl46/quads3.vert");
-        String taa = pipeline.taaFunction("taaShift");
-        if (taa != null) {
-            vertex += "\n" + taa;
-        }
-        var builder = Shader.make()
-                .apply(this.properties::apply)
-                .defineIf("TAA_PATCH", taa != null)
-                .defineIf("DEBUG_RENDER", false)
-                .defineIf("CHUNK_MASK_HALF_RES", this.chunkMaskHalfRes)
-                .addSource(ShaderType.VERTEX, vertex);
+                    .define("TRANSLUCENT_DISTANCE_BUFFER_BINDING", 7)
 
-        // 方向光照在顶点阶段处理，保持模型颜色和 LOD 光照采样一致。
-        addDirectionalFaceTint(builder, Minecraft.getInstance().level);
+                    .defineIf("HAS_STATISTICS", RenderStatistics.enabled)
+                    .defineIf("STATISTICS_BUFFER_BINDING", RenderStatistics.enabled, STATISTICS_BUFFER_BINDING)
 
-        String frag = ShaderLoader.parse("voxy:lod/gl46/quads.frag");
-
-        String opaqueFrag = pipeline.patchOpaqueShader(this, frag);
-        opaqueFrag = opaqueFrag == null ? frag : opaqueFrag;
-
-        this.terrainShader = tryCompilePatchedOrNormal(builder, opaqueFrag, frag);
-
-        String translucentFrag = pipeline.patchTranslucentShader(this, frag);
-        translucentFrag = translucentFrag == null ? frag : translucentFrag;
-
-        this.translucentTerrainShader = tryCompilePatchedOrNormal(builder.define("TRANSLUCENT"), translucentFrag, frag);
-
-        if (this.pipeline.hasTAA()) {
-            this.cullShader = Shader.make()
-                    .apply(this.properties::apply)
-                    .addSource(ShaderType.VERTEX,
-                            ShaderLoader.parse("voxy:lod/gl46/cull/raster.vert")
-                                    + "\n\n\n\n" + pipeline.taaFunction("getTAA"))
-                    .define("TAA")
-                    .add(ShaderType.FRAGMENT, "voxy:lod/gl46/cull/raster.frag")
+                    .add(ShaderType.COMPUTE, "voxy:lod/gl46/cmdgen.comp")
                     .compile();
-        } else {
-            this.cullShader = Shader.make()
-                    .apply(this.properties::apply)
-                    .add(ShaderType.VERTEX, "voxy:lod/gl46/cull/raster.vert")
-                    .add(ShaderType.FRAGMENT, "voxy:lod/gl46/cull/raster.frag")
+            this.prepShader = Shader.make()
+                    .add(ShaderType.COMPUTE, "voxy:lod/gl46/prep.comp")
                     .compile();
+            this.prefixSumShader = Shader.make()
+                    .add(ShaderType.COMPUTE, Capabilities.INSTANCE.subgroup?"voxy:util/prefixsum/inital3.comp":"voxy:util/prefixsum/simple.comp")
+                    .define("IO_BUFFER", 0)
+                    .compile();
+            this.translucentGenShader = Shader.make()
+                    .add(ShaderType.COMPUTE, "voxy:lod/gl46/buildtranslucents.comp")
+                    .define("TRANSLUCENT_WRITE_BASE", 1024)
+                    .defineIf("OPAQUE_NEAR_FIRST", this.opaqueNearFirst)
+                    .define("TRANSLUCENT_DISTANCE_BUFFER_BINDING", 5)
+                    .define("TRANSLUCENT_OFFSET", TRANSLUCENT_OFFSET)
+
+                    .compile();
+            this.uniform = new GlBuffer(1024).zero();
+            this.distanceCountBuffer = new GlBuffer(1024*4+TRANSLUCENT_DRAW_COUNT*4).zero();
+            this.statisticsBuffer = new GlBuffer(1024).zero();
+            this.pipeline = pipeline;
+            var level = Minecraft.getInstance().level;
+            this.fluidDatumY = level == null ? -1.0e9f : level.getSeaLevel() - (7.0f / 64.0f);
+
+            // 管线可以在 shader 构建阶段注入 TAA、雾效和光影兼容代码。
+            String vertex = ShaderLoader.parse("voxy:lod/gl46/quads3.vert");
+            String taa = pipeline.taaFunction("taaShift");
+            if (taa != null) {
+                vertex += "\n" + taa;
+            }
+            var builder = Shader.make()
+                    .apply(this.properties::apply)
+                    .defineIf("TAA_PATCH", taa != null)
+                    .defineIf("DEBUG_RENDER", false)
+                    .defineIf("CHUNK_MASK_HALF_RES", this.chunkMaskHalfRes)
+                    .addSource(ShaderType.VERTEX, vertex);
+
+            // 方向光照在顶点阶段处理，保持模型颜色和 LOD 光照采样一致。
+            addDirectionalFaceTint(builder, Minecraft.getInstance().level);
+
+            String frag = ShaderLoader.parse("voxy:lod/gl46/quads.frag");
+
+            String opaqueFrag = pipeline.patchOpaqueShader(this, frag);
+            opaqueFrag = opaqueFrag == null ? frag : opaqueFrag;
+
+            this.terrainShader = tryCompilePatchedOrNormal(builder, opaqueFrag, frag);
+
+            String translucentFrag = pipeline.patchTranslucentShader(this, frag);
+            translucentFrag = translucentFrag == null ? frag : translucentFrag;
+
+            this.translucentTerrainShader = tryCompilePatchedOrNormal(builder.define("TRANSLUCENT"), translucentFrag, frag);
+
+            if (this.pipeline.hasTAA()) {
+                this.cullShader = Shader.make()
+                        .apply(this.properties::apply)
+                        .addSource(ShaderType.VERTEX,
+                                ShaderLoader.parse("voxy:lod/gl46/cull/raster.vert")
+                                        + "\n\n\n\n" + pipeline.taaFunction("getTAA"))
+                        .define("TAA")
+                        .add(ShaderType.FRAGMENT, "voxy:lod/gl46/cull/raster.frag")
+                        .compile();
+            } else {
+                this.cullShader = Shader.make()
+                        .apply(this.properties::apply)
+                        .add(ShaderType.VERTEX, "voxy:lod/gl46/cull/raster.vert")
+                        .add(ShaderType.FRAGMENT, "voxy:lod/gl46/cull/raster.frag")
+                        .compile();
+            }
+        } catch (RuntimeException | Error failure) {
+            this.releaseResources(new ExceptionCleanup(failure));
+            throw failure;
         }
     }
 
@@ -451,16 +465,21 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
     @Override
     public void free() {
-        // 释放顺序与 shader/缓冲的创建顺序相反，确保 GPU 句柄不会泄漏到下一个世界。
-        this.uniform.free();
-        this.distanceCountBuffer.free();
-        this.translucentTerrainShader.free();
-        this.terrainShader.free();
-        this.commandGenShader.free();
-        this.cullShader.free();
-        this.prepShader.free();
-        this.translucentGenShader.free();
-        this.prefixSumShader.free();
-        this.statisticsBuffer.free();
+        var cleanup = new ExceptionCleanup(null);
+        this.releaseResources(cleanup);
+        cleanup.rethrow();
+    }
+
+    private void releaseResources(ExceptionCleanup cleanup) {
+        if (this.cullShader != null) cleanup.run(this.cullShader::free);
+        if (this.translucentTerrainShader != null) cleanup.run(this.translucentTerrainShader::free);
+        if (this.terrainShader != null) cleanup.run(this.terrainShader::free);
+        if (this.statisticsBuffer != null) cleanup.run(this.statisticsBuffer::free);
+        if (this.distanceCountBuffer != null) cleanup.run(this.distanceCountBuffer::free);
+        if (this.uniform != null) cleanup.run(this.uniform::free);
+        if (this.translucentGenShader != null) cleanup.run(this.translucentGenShader::free);
+        if (this.prefixSumShader != null) cleanup.run(this.prefixSumShader::free);
+        if (this.prepShader != null) cleanup.run(this.prepShader::free);
+        if (this.commandGenShader != null) cleanup.run(this.commandGenShader::free);
     }
 }

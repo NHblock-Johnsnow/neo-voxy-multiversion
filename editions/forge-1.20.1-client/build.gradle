@@ -153,9 +153,7 @@ jar {
         exclude 'META-INF/*.SF', 'META-INF/*.RSA', 'META-INF/*.DSA'
         exclude 'module-info.class', 'META-INF/versions/**/module-info.class'
     }
-    from('LICENSE.md') {
-        rename { "LICENSE_${project.archives_base_name}.md" }
-    }
+    from('../../README.md')
 }
 
 tasks.named('remapJar') {

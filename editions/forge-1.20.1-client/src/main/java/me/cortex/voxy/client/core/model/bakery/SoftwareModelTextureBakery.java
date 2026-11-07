@@ -44,8 +44,10 @@ import static org.lwjgl.opengl.ARBDirectStateAccess.glGetTextureImage;
 import static org.lwjgl.opengl.GL11.*;
 import static org.lwjgl.opengl.GL11C.GL_RGBA;
 import static org.lwjgl.opengl.GL12.GL_PACK_IMAGE_HEIGHT;
+import static org.lwjgl.opengl.GL12.GL_PACK_SKIP_IMAGES;
 import static org.lwjgl.opengl.GL15C.glBindBuffer;
 import static org.lwjgl.opengl.GL21.GL_PIXEL_PACK_BUFFER;
+import static org.lwjgl.opengl.GL21.GL_PIXEL_PACK_BUFFER_BINDING;
 import static org.lwjgl.opengl.GL30C.GL_FRAMEBUFFER;
 import static org.lwjgl.opengl.GL30C.glBindFramebuffer;
 
@@ -91,14 +93,26 @@ public class SoftwareModelTextureBakery {
 
     /** 在读取图集前清空像素缓冲绑定，完成后恢复 OpenGL 状态。 */
     private void doSetupTexture(int glId) {
-        glBindTexture(GL_TEXTURE_2D, glId);
-        int width = glGetTexLevelParameteri(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH);
-        int height = glGetTexLevelParameteri(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT);
-
-        int[] pixels = new int[width * height];
-        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-
-        this.rasterizer.setSamplerTexture(pixels, width, height);
+        int texture = glGetInteger(GL_TEXTURE_BINDING_2D);
+        int pbo = glGetInteger(GL_PIXEL_PACK_BUFFER_BINDING);
+        int[] packNames = {GL_PACK_ROW_LENGTH, GL_PACK_IMAGE_HEIGHT, GL_PACK_SKIP_ROWS,
+                GL_PACK_SKIP_PIXELS, GL_PACK_SKIP_IMAGES, GL_PACK_ALIGNMENT};
+        int[] packValues = new int[packNames.length];
+        for (int i = 0; i < packNames.length; i++) packValues[i] = glGetInteger(packNames[i]);
+        try {
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+            for (int name : packNames) glPixelStorei(name, name == GL_PACK_ALIGNMENT ? 4 : 0);
+            glBindTexture(GL_TEXTURE_2D, glId);
+            int width = glGetTexLevelParameteri(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH);
+            int height = glGetTexLevelParameteri(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT);
+            int[] pixels = new int[Math.multiplyExact(width, height)];
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+            this.rasterizer.setSamplerTexture(pixels, width, height);
+        } finally {
+            glBindTexture(GL_TEXTURE_2D, texture);
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo);
+            for (int i = 0; i < packNames.length; i++) glPixelStorei(packNames[i], packValues[i]);
+        }
     }
 
     private boolean bakeBlockModel(BlockState state, RenderType layer) {

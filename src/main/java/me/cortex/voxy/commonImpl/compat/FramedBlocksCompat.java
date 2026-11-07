@@ -15,9 +15,6 @@ import net.neoforged.neoforge.client.model.data.ModelData;
 import net.neoforged.neoforge.client.model.data.ModelProperty;
 
 import java.lang.reflect.Method;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.util.HexFormat;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -107,7 +104,7 @@ public final class FramedBlocksCompat {
                     updateTag.remove("id");
                     CompoundTag descriptor = new CompoundTag();
                     descriptor.put("block_entity", updateTag);
-                    String key = digest(updateTag.toString());
+                    String key = NbtVariantKey.of(updateTag);
 
                     int mappedId = mapper.getIdForBlockStateVariant(state, VARIANT_TYPE, key, descriptor);
                     descriptorsFor(mapper).putIfAbsent(mappedId, descriptor.copy());
@@ -228,14 +225,7 @@ public final class FramedBlocksCompat {
         colourAccessResolved = true;
     }
 
-    private static String digest(String value) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(StandardCharsets.UTF_8)));
-        } catch (Exception ignored) {
-            return Integer.toUnsignedString(value.hashCode(), 16);
-        }
-    }
+
 
     private static CompoundTag descriptorFor(Mapper mapper, int blockId) {
         if (!LOADED || mapper == null) return null;

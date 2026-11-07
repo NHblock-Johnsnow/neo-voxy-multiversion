@@ -10,33 +10,64 @@ import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.texture.OverlayTexture;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.resources.ResourceLocation;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 public final class DistantBogeyMeshes {
-    private static final Map<String, DistantMesh> CACHE = new HashMap<>();
+    private record Key(ResourceLocation style, ResourceLocation size, CompoundTag data) {}
+    private static final Map<Key, DistantMesh> CACHE = new HashMap<>();
+    private static final Set<Key> CAPTURING = new HashSet<>();
     private static boolean errored;
+    private static int generation;
 
     private DistantBogeyMeshes() {}
 
     //Null when the style is unknown client side or capture failed (cached either way)
     public static DistantMesh getOrCapture(ShapeBogey info) {
-        String key = info.styleId() + "|" + info.sizeId();
+        // 键持有独立 NBT；样式渲染器即使修改输入，也不会破坏缓存的 hash。
+        var key = new Key(info.styleId(), info.sizeId(), info.data().copy());
         if (CACHE.containsKey(key)) {
             return CACHE.get(key);
         }
+        // 样式回调可重入；临时空结果不能进入负缓存。
+        if (!CAPTURING.add(key)) return null;
+        int captureGeneration = generation;
         DistantMesh mesh = null;
         try {
             mesh = capture(info);
         } catch (Throwable e) {
-            if (!errored) {
+            if (captureGeneration == generation && !errored) {
                 errored = true;
                 Logger.error("Distant bogey capture failed for " + key + " (logged once)", e);
             }
+        } finally {
+            CAPTURING.remove(key);
+        }
+        if (captureGeneration != generation) {
+            if (mesh != null) mesh.free();
+            return null;
         }
         CACHE.put(key, mesh);
         return mesh;
+    }
+
+    public static boolean isCapturing() {
+        return !CAPTURING.isEmpty();
+    }
+
+    public static void clear() {
+        // 保留进行中的门禁，直到旧样式回调退出。
+        generation++;
+        for (var mesh : CACHE.values()) {
+            if (mesh != null) mesh.free();
+        }
+        CACHE.clear();
+        errored = false;
     }
 
     private static DistantMesh capture(ShapeBogey info) {
@@ -63,7 +94,7 @@ public final class DistantBogeyMeshes {
         try {
             //BogeyStyle.render applies the -1.5078125 offset internally, so the snapshot bakes it in
             style.render(size, 0.0f, new PoseStack(), capture,
-                    LightTexture.pack(0, 15), OverlayTexture.NO_OVERLAY, 0.0f, info.data(), true);
+                    LightTexture.pack(0, 15), OverlayTexture.NO_OVERLAY, 0.0f, info.data().copy(), true);
             capture.flush();
         } catch (Throwable e) {
             //build() is the only path that frees the native buffer; free it before the exception

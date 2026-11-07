@@ -16,7 +16,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(value = SodiumPrograms.class, remap = false)
 public abstract class MixinSodiumShadowBoundary {
    private static final String MARKER = "voxy_shadow_boundary_distance";
-   private static final Pattern MAIN = Pattern.compile("\\bvoid\\s+main\\s*\\(\\s*(?:void\\s*)?\\)");
+    private static final Pattern MAIN = Pattern.compile("\\bvoid\\s+main\\s*\\(\\s*(?:void\\s*)?\\)(?=\\s*\\{)");
    private static boolean warned;
 
    @Inject(method = "createGlShaders", at = @At("HEAD"))

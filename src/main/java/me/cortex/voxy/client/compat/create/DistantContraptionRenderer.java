@@ -39,6 +39,11 @@ public final class DistantContraptionRenderer implements LodPipelineHooks.Render
         DistantContraptionManager.update(mc.level, cam.x, cam.y, cam.z, maxDist);
     }
 
+    @Override
+    public void onResourceReload() {
+        DistantContraptionManager.onResourceReload();
+    }
+
     @net.neoforged.bus.api.SubscribeEvent
     public void onLogout(net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent.LoggingOut event) {
         DistantContraptionManager.clearAll();

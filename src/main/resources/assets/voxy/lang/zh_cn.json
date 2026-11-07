@@ -66,7 +66,7 @@
   "voxy.config.general.fogDensity": "雾过渡",
   "voxy.config.general.fogDensity.tooltip": "控制雾的过渡曲线，数值越高过渡越极端——近处越通透，越靠近雾距离末端才骤然变浓；0 为均匀线性渐变",
   "voxy.config.general.skyFogDistance": "天空雾距离",
-  "voxy.config.general.skyFogDistance.tooltip": "天空与 LOD 地形雾的结束距离，单位为区块",
+  "voxy.config.general.skyFogDistance.tooltip": "天空雾的结束距离，单位为区块",
   "voxy.config.general.fog_distance": "雾距离",
   "voxy.config.general.fog_distance.tooltip": "缩放 voxy 的 LOD 雾距离（100% = 在渲染边缘达到满雾）。数值越高，远景 LOD 越晚淡入天空色、能看得越远。",
   "voxy.config.fakesight": "扩展区块请求",

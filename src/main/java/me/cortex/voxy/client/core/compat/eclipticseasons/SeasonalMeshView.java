@@ -13,6 +13,7 @@ import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.model.bakery.ReuseVertexConsumer;
 import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.common.world.WorldSection;
+import me.cortex.voxy.common.world.SurfaceWorldView;
 import me.cortex.voxy.common.world.other.Mapper;
 import me.cortex.voxy.common.world.other.SeasonalIdSpace;
 import net.minecraft.client.renderer.RenderType;
@@ -50,19 +51,24 @@ public class SeasonalMeshView implements SeasonalLod.View {
     @SuppressWarnings("unchecked")
     private static final Holder<Biome>[] EMPTY_BIOMES = new Holder[0];
 
-    private static final Map<Mapper, int[]> CANDIDATE_CACHES = new WeakHashMap<>();
-    private static final Map<Mapper, Holder<Biome>[]> BIOME_CACHES = new WeakHashMap<>();
+    private static final class JudgementCaches {
+        final Map<Mapper, int[]> candidates = new WeakHashMap<>();
+        final Map<Mapper, Holder<Biome>[]> biomes = new WeakHashMap<>();
+    }
+
+    private static volatile JudgementCaches judgementCaches = new JudgementCaches();
 
     //The season definitions and snow tables are data driven: a solar-term change or a logout can
     //sit on top of a /reload that changed them, so both events drop the verdicts wholesale
     public static void clearJudgementCaches() {
-        synchronized (CANDIDATE_CACHES) { CANDIDATE_CACHES.clear(); }
-        synchronized (BIOME_CACHES) { BIOME_CACHES.clear(); }
+        // 旧 worker 只能回填旧容器，不能把 reload 前的判断重新发布到新缓存。
+        judgementCaches = new JudgementCaches();
     }
 
     private static final class Ctx {
         Level level;
         Mapper mapper;
+        JudgementCaches caches;
         int[] candidates;
         Holder<Biome>[] biomes;
         boolean snowyWinter;
@@ -78,12 +84,13 @@ public class SeasonalMeshView implements SeasonalLod.View {
         var ctx = new Ctx();
         ctx.level = level;
         ctx.mapper = mapper;
-        synchronized (CANDIDATE_CACHES) {
-            var cache = CANDIDATE_CACHES.get(mapper);
+        ctx.caches = judgementCaches;
+        synchronized (ctx.caches.candidates) {
+            var cache = ctx.caches.candidates.get(mapper);
             ctx.candidates = cache != null ? cache : EMPTY_CANDIDATES;
         }
-        synchronized (BIOME_CACHES) {
-            var cache = BIOME_CACHES.get(mapper);
+        synchronized (ctx.caches.biomes) {
+            var cache = ctx.caches.biomes.get(mapper);
             ctx.biomes = cache != null ? cache : EMPTY_BIOMES;
         }
         ctx.snowyWinter = CommonConfig.isSnowyWinter();
@@ -113,8 +120,8 @@ public class SeasonalMeshView implements SeasonalLod.View {
             }
         }
         v |= snowFlag & FLAG_MASK;
-        synchronized (CANDIDATE_CACHES) {
-            int[] cache = CANDIDATE_CACHES.get(ctx.mapper);
+        synchronized (ctx.caches.candidates) {
+            int[] cache = ctx.caches.candidates.get(ctx.mapper);
             if (cache == null || realBlockId >= cache.length) {
                 int[] grown = new int[Math.max(realBlockId + 1,
                         cache == null ? 1024 : cache.length << 1)];
@@ -122,7 +129,7 @@ public class SeasonalMeshView implements SeasonalLod.View {
                 cache = grown;
             }
             cache[realBlockId] = v;
-            CANDIDATE_CACHES.put(ctx.mapper, cache);
+            ctx.caches.candidates.put(ctx.mapper, cache);
             ctx.candidates = cache;
         }
         return v;
@@ -141,8 +148,8 @@ public class SeasonalMeshView implements SeasonalLod.View {
         var key = ResourceKey.create(Registries.BIOME, ResourceLocation.parse(entry.biome));
         Holder<Biome> resolved = ctx.level.registryAccess().registryOrThrow(Registries.BIOME)
                 .getHolder(key).map(h -> (Holder<Biome>) h).orElse(PlainsStubHolder.PLAINS);
-        synchronized (BIOME_CACHES) {
-            var current = BIOME_CACHES.get(ctx.mapper);
+        synchronized (ctx.caches.biomes) {
+            var current = ctx.caches.biomes.get(ctx.mapper);
             if (current == null || current.length <= biomeId) {
                 var grown = new Holder[Math.max(biomeId + 1,
                         current == null ? 512 : current.length << 1)];
@@ -150,7 +157,7 @@ public class SeasonalMeshView implements SeasonalLod.View {
                 current = (Holder<Biome>[]) grown;
             }
             current[biomeId] = resolved;
-            BIOME_CACHES.put(ctx.mapper, current);
+            ctx.caches.biomes.put(ctx.mapper, current);
             ctx.biomes = current;
         }
         return resolved;
@@ -163,10 +170,19 @@ public class SeasonalMeshView implements SeasonalLod.View {
 
     @Override
     public long[] substituteSection(WorldEngine world, WorldSection section, long[] source) {
-        if (!VoxyConfig.CONFIG.eclipticSeasonsSnowLod) return source;
-        if (seasonInactive()) return source;
+        try (var surface = new SurfaceWorldView().open(world, section)) {
+            return this.substituteSection(world, section, source, surface);
+        }
+    }
+
+    @Override
+    public long[] substituteSection(WorldEngine world, WorldSection section, long[] source,
+                                    SurfaceWorldView surface) {
+        if (!VoxyConfig.CONFIG.eclipticSeasonsSnowLod || seasonInactive()) {
+            return restoreBaseIds(world.getMapper(), source);
+        }
         Level level = ClientCon.getUseLevel();
-        if (level == null) return source;
+        if (level == null) return restoreBaseIds(world.getMapper(), source);
 
         var ctx = makeCtx(level, world.getMapper());
         long[] output = source;
@@ -180,122 +196,155 @@ public class SeasonalMeshView implements SeasonalLod.View {
         var pos = POS.get();
         WorldSection aboveSection = null;
         boolean aboveChecked = false;
-        try {
-            for (int index = 0; index < source.length; index++) {
-                long mappingId = source[index];
-                if (Mapper.isAir(mappingId)) continue;
+        for (int index = 0; index < source.length; index++) {
+            long mappingId = source[index];
+            if (Mapper.isAir(mappingId)) continue;
 
-                int storedBlockId = Mapper.getBlockId(mappingId);
-                //Decode first: legacy archives hold complement-encoded snow, and re-encoding an
-                //already-encoded id must be impossible for the pass to be idempotent
-                int originalBlockId = SeasonalIdSpace.decode(ctx.mapper, storedBlockId);
+            int storedBlockId = Mapper.getBlockId(mappingId);
+            //Decode first: legacy archives hold complement-encoded snow, and re-encoding an
+            //already-encoded id must be impossible for the pass to be idempotent
+            int originalBlockId = SeasonalIdSpace.decode(ctx.mapper, storedBlockId);
 
-                //Cache-first: the common verdict (not seasonal, not snowable) must cost one array
-                //read, with no BlockState fetch on the hit path
-                int cand = originalBlockId < ctx.candidates.length ? ctx.candidates[originalBlockId] : 0;
-                if (cand == 0) cand = computeCandidate(ctx, originalBlockId);
-                if ((cand & (F_SEASONAL | F_FREEZABLE)) == 0
-                        && (cand & FLAG_MASK) <= MapChecker.FLAG_NONE) continue;
-
-                long aboveMappingId;
-                boolean aboveKnown = true;
-                int localY = index >>> 10;
-                if (localY < 31) {
-                    aboveMappingId = source[index + 1024];
-                } else {
-                    if (!aboveChecked) {
-                        aboveChecked = true;
-                        aboveSection = world.acquireIfExists(section.lvl, section.x, section.y + 1, section.z);
-                    }
-                    if (aboveSection == null) {
-                        // Snow and ice require evidence about the voxel above, but seasonal models
-                        // whose definition does not require emptyAbove can still be selected.
-                        if ((cand & F_SEASONAL) == 0) continue;
-                        aboveKnown = false;
-                        aboveMappingId = 0;
-                    } else {
-                        //Single-voxel read: materialising the neighbour would permanently expand a
-                        //uniform section into a pooled 256KiB array for a 1024-voxel row
-                        aboveMappingId = aboveSection.get(index & 0x3FF);
-                    }
-                }
-
-                //Light and winter gates before any BlockState fetch: snow and ice need a snowy
-                //winter and lit sky above, seasonal models need neither
-                boolean canSnow = aboveKnown && canSnow(ctx, aboveMappingId);
-                boolean canFreeze = aboveKnown && canFreeze(ctx, aboveMappingId);
-                if (!canSnow && !canFreeze && (cand & F_SEASONAL) == 0) continue;
-
-                pos.set(baseX + (index & 31) * scale,
-                        baseY + localY * scale,
-                        baseZ + ((index >> 5) & 31) * scale);
-
-                int renderBlockId = judge(ctx, mappingId, aboveMappingId, aboveKnown,
-                        originalBlockId, cand, canSnow, canFreeze, pos);
-                if (renderBlockId == storedBlockId) continue;
-
-                if (output == source) output = Arrays.copyOf(source, source.length);
-                output[index] = Mapper.withBlockBiome(mappingId, renderBlockId, Mapper.getBiomeId(mappingId));
+            //Cache-first: the common verdict (not seasonal, not snowable) must cost one array
+            //read, with no BlockState fetch on the hit path
+            int cand = originalBlockId < ctx.candidates.length ? ctx.candidates[originalBlockId] : 0;
+            if (cand == 0) cand = computeCandidate(ctx, originalBlockId);
+            if ((cand & (F_SEASONAL | F_FREEZABLE)) == 0
+                    && (cand & FLAG_MASK) <= MapChecker.FLAG_NONE) {
+                output = setRenderBlock(source, output, index, originalBlockId);
+                continue;
             }
-            return output;
-        } finally {
-            if (aboveSection != null) aboveSection.release(WorldSection.RELEASE_HINT_POSSIBLE_REUSE);
+
+            long aboveMappingId;
+            boolean aboveKnown = true;
+            int localY = index >>> 10;
+            if (localY < 31) {
+                aboveMappingId = source[index + 1024];
+            } else {
+                if (!aboveChecked) {
+                    aboveChecked = true;
+                    aboveSection = surface.sectionAt(0, 1, 0);
+                }
+                if (aboveSection == null) {
+                    // Snow and ice require evidence about the voxel above, but seasonal models
+                    // whose definition does not require emptyAbove can still be selected.
+                    if ((cand & F_SEASONAL) == 0) {
+                        output = setRenderBlock(source, output, index, originalBlockId);
+                        continue;
+                    }
+                    aboveKnown = false;
+                    aboveMappingId = 0;
+                } else {
+                    //Single-voxel read: materialising the neighbour would permanently expand a
+                    //uniform section into a pooled 256KiB array for a 1024-voxel row
+                    aboveMappingId = surface.get(index & 31, 32, (index >> 5) & 31);
+                }
+            }
+
+            //Light and winter gates before any BlockState fetch: snow and ice need a snowy
+            //winter and lit sky above, seasonal models need neither
+            boolean canSnow = aboveKnown && canSnow(ctx, aboveMappingId);
+            boolean canFreeze = aboveKnown && canFreeze(ctx, aboveMappingId);
+            if (!canSnow && !canFreeze && (cand & F_SEASONAL) == 0) {
+                output = setRenderBlock(source, output, index, originalBlockId);
+                continue;
+            }
+
+            pos.set(baseX + (index & 31) * scale,
+                    baseY + localY * scale,
+                    baseZ + ((index >> 5) & 31) * scale);
+
+            int renderBlockId = judge(ctx, mappingId, aboveMappingId, aboveKnown,
+                    originalBlockId, cand, canSnow, canFreeze, pos);
+            output = setRenderBlock(source, output, index, renderBlockId);
+        }
+        return output;
+    }
+
+    @Override
+    public void substituteLateralSlices(WorldEngine world, WorldSection section,
+                                         long[] neighborFaces, int neighborMsk) {
+        try (var surface = new SurfaceWorldView().open(world, section)) {
+            this.substituteLateralSlices(world, section, neighborFaces, neighborMsk, surface);
         }
     }
 
     @Override
     public void substituteLateralSlices(WorldEngine world, WorldSection section,
-                                        long[] neighborFaces, int neighborMsk) {
-        if (!VoxyConfig.CONFIG.eclipticSeasonsSnowLod) return;
-        if (seasonInactive()) return;
-        Level level = ClientCon.getUseLevel();
-        if (level == null) return;
-        var ctx = makeCtx(level, world.getMapper());
-
-        int scale = 1 << section.lvl;
-        int centerOffset = section.lvl == 0 ? 0 : scale >> 1;
-        int baseX = ((section.x << 5) << section.lvl) + centerOffset;
-        int baseY = ((section.y << 5) << section.lvl) + centerOffset;
-        int baseZ = ((section.z << 5) << section.lvl) + centerOffset;
-
-        //msk bit -> slice, fixed X/Z world coordinate, horizontal axis of the slice index
-        substituteSlice(ctx, neighborFaces, neighborMsk, 1, 0, baseX - scale, baseY, baseZ, true, scale);
-        substituteSlice(ctx, neighborFaces, neighborMsk, 2, 1, baseX + 32 * scale, baseY, baseZ, true, scale);
-        substituteSlice(ctx, neighborFaces, neighborMsk, 16, 4, baseZ - scale, baseY, baseX, false, scale);
-        substituteSlice(ctx, neighborFaces, neighborMsk, 32, 5, baseZ + 32 * scale, baseY, baseX, false, scale);
+                                         long[] faces, int mask, SurfaceWorldView surface) {
+        // 同一纯几何视图也提供顶行的上方证据，避免邻面与主段采用不同雪/冰规则。
+        if ((mask & 1) != 0) this.substituteRegion(world, surface, faces, 0, 1, 32, 32, 1, 32, -1, 0, 0);
+        if ((mask & 2) != 0) this.substituteRegion(world, surface, faces, 1024, 1, 32, 32, 1, 32, 32, 0, 0);
+        if ((mask & 16) != 0) this.substituteRegion(world, surface, faces, 4096, 32, 32, 1, 32, 32, 0, 0, -1);
+        if ((mask & 32) != 0) this.substituteRegion(world, surface, faces, 5120, 32, 32, 1, 32, 32, 0, 0, 32);
     }
 
-    private void substituteSlice(Ctx ctx, long[] faces, int msk, int bit, int slice,
-                                 int fixedCoord, int baseY, int baseH, boolean fixedIsX, int scale) {
-        if ((msk & bit) == 0) return;
-        int base = slice * 32 * 32;
+    @Override
+    public void substituteRegion(WorldEngine world, SurfaceWorldView surface, long[] data,
+                                 int offset, int width, int height, int depth,
+                                 int rowStride, int layerStride, int x, int y, int z) {
+        boolean active = VoxyConfig.CONFIG.eclipticSeasonsSnowLod && !seasonInactive();
+        Level level = active ? ClientCon.getUseLevel() : null;
+        Ctx ctx = level == null ? null : makeCtx(level, world.getMapper());
+        Mapper mapper = world.getMapper();
+        WorldSection section = surface.origin();
+        int scale = 1 << section.lvl;
+        int center = section.lvl == 0 ? 0 : scale >> 1;
+        int baseX = (section.x << (5 + section.lvl)) + center;
+        int baseY = (section.y << (5 + section.lvl)) + center;
+        int baseZ = (section.z << (5 + section.lvl)) + center;
         var pos = POS.get();
-        for (int i = 0; i < 32 * 31; i++) {//y == 31 row excluded
-            long mappingId = faces[base + i];
-            if (mappingId == 0 || Mapper.isAir(mappingId)) continue;//0 doubles as the cleared-slice sentinel
-
-            int storedBlockId = Mapper.getBlockId(mappingId);
-            int originalBlockId = SeasonalIdSpace.decode(ctx.mapper, storedBlockId);
-            int cand = originalBlockId < ctx.candidates.length ? ctx.candidates[originalBlockId] : 0;
-            if (cand == 0) cand = computeCandidate(ctx, originalBlockId);
-            if ((cand & (F_SEASONAL | F_FREEZABLE)) == 0
-                    && (cand & FLAG_MASK) <= MapChecker.FLAG_NONE) continue;
-
-            long aboveMappingId = faces[base + i + 32];
-            boolean canSnow = canSnow(ctx, aboveMappingId);
-            boolean canFreeze = canFreeze(ctx, aboveMappingId);
-            if (!canSnow && !canFreeze && (cand & F_SEASONAL) == 0) continue;
-
-            int h = (i & 31), y = i >> 5;
-            if (fixedIsX) pos.set(fixedCoord, baseY + y * scale, baseH + h * scale);
-            else pos.set(baseH + h * scale, baseY + y * scale, fixedCoord);
-
-            int renderBlockId = judge(ctx, mappingId, aboveMappingId, true,
-                    originalBlockId, cand, canSnow, canFreeze, pos);
-            if (renderBlockId != storedBlockId) {
-                faces[base + i] = Mapper.withBlockBiome(mappingId, renderBlockId, Mapper.getBiomeId(mappingId));
+        for (int iy = 0; iy < height; iy++) {
+            for (int iz = 0; iz < depth; iz++) {
+                for (int ix = 0; ix < width; ix++) {
+                    int index = offset + iy * layerStride + iz * rowStride + ix;
+                    long value = data[index];
+                    if (Mapper.isAir(value)) continue;
+                    int original = SeasonalIdSpace.decode(mapper, Mapper.getBlockId(value));
+                    int render = original;
+                    if (ctx != null) {
+                        int cand = original < ctx.candidates.length ? ctx.candidates[original] : 0;
+                        if (cand == 0) cand = computeCandidate(ctx, original);
+                        if ((cand & (F_SEASONAL | F_FREEZABLE)) != 0 || (cand & FLAG_MASK) > MapChecker.FLAG_NONE) {
+                            int vx = x + ix, vy = y + iy, vz = z + iz;
+                            boolean aboveKnown = surface.sectionAt(vx >> 5, (vy + 1) >> 5, vz >> 5) != null;
+                            long above = aboveKnown ? surface.get(vx, vy + 1, vz) : 0;
+                            boolean snow = aboveKnown && canSnow(ctx, above);
+                            boolean freeze = aboveKnown && canFreeze(ctx, above);
+                            if (snow || freeze || (cand & F_SEASONAL) != 0) {
+                                pos.set(baseX + vx * scale, baseY + vy * scale, baseZ + vz * scale);
+                                render = judge(ctx, value, above, aboveKnown, original, cand, snow, freeze, pos);
+                            }
+                        }
+                    }
+                    if (render != Mapper.getBlockId(value)) data[index] = withRenderBlock(value, render);
+                }
             }
         }
+    }
+
+    private static long[] setRenderBlock(long[] source, long[] output, int index, int renderBlockId) {
+        long mappingId = source[index];
+        if (Mapper.getBlockId(mappingId) == renderBlockId) return output;
+        if (output == source) output = Arrays.copyOf(source, source.length);
+        output[index] = withRenderBlock(mappingId, renderBlockId);
+        return output;
+    }
+
+    private static long withRenderBlock(long mappingId, int blockId) {
+        return (mappingId & ~(0xFFFFFL << 27)) | ((long) blockId << 27);
+    }
+
+    private static long[] restoreBaseIds(Mapper mapper, long[] source) {
+        long[] output = source;
+        int stateCount = mapper.getBlockStateCount();
+        for (int index = 0; index < source.length; index++) {
+            int stored = Mapper.getBlockId(source[index]);
+            if (stored >= stateCount) {
+                output = setRenderBlock(source, output, index, SeasonalIdSpace.decode(mapper, stored));
+            }
+        }
+        return output;
     }
 
     //Voxel light packs sky in the low nibble, block in the high (VoxelIngestService). The

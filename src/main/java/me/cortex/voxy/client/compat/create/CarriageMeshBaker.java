@@ -116,6 +116,7 @@ public final class CarriageMeshBaker {
                 continue;
             }
             var pos = entry.getKey();
+            builder.mark();
             try {
                 //Tint through the grid slice: biome resolvers answer with the camera-position biome
                 //colour (grass on a snowy-plains train is pale, not default green); -1 = no resolver.
@@ -158,7 +159,7 @@ public final class CarriageMeshBaker {
                     }
                 }
             } catch (Throwable ignored) {
-                //A single broken third party model must not sink the whole carriage
+                builder.rollback();
             }
         }
 

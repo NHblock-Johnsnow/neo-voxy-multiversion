@@ -27,16 +27,35 @@ public class VoxyClientInstance extends VoxyInstance {
     private final Config config;
     private final Path basePath;
     private final boolean noIngestOverride;
+    private record Bootstrap(Path path, Config config, boolean noIngestOverride) {}
+
     public VoxyClientInstance() {
+        this(prepare());
+    }
+
+    private VoxyClientInstance(Bootstrap bootstrap) {
         super();
+        this.basePath = bootstrap.path();
+        this.config = bootstrap.config();
+        this.noIngestOverride = bootstrap.noIngestOverride();
+        try {
+            this.updateDedicatedThreads();
+        } catch (RuntimeException | Error failure) {
+            super.shutdown();
+            throw failure;
+        }
+    }
+
+    private static Bootstrap prepare() {
         var path = VoxyCommon.getPlatformUtil().getReplayStoragePath(VoxyCommon.getPlatformUtil().isModLoaded("flashback"));
-        this.noIngestOverride = path != null;
+        boolean noIngestOverride = path != null;
         if (path == null) {
             path = getBasePath();
         }
-        this.basePath = path.normalize();
-        this.config = StorageConfigUtil.getCreateStorageConfig(Config.class, c->c.version==1&&c.sectionStorageConfig!=null, ()->DEFAULT_STORAGE_CONFIG, this.basePath);
-        this.updateDedicatedThreads();
+        path = path.normalize();
+        Config config = StorageConfigUtil.getCreateStorageConfig(Config.class, c->c.version==1&&c.sectionStorageConfig!=null, ()->DEFAULT_STORAGE_CONFIG, path);
+        if (config.disabled) throw new me.cortex.voxy.commonImpl.DontCreateInstance();
+        return new Bootstrap(path, config, noIngestOverride);
     }
 
     @Override

@@ -47,6 +47,10 @@ public final class VoxyProfile {
     private static final Map<String, Entry> GPU = new ConcurrentHashMap<>();
     private static volatile int gpuSamples;
 
+    public static long gpuCaptureId() {
+        return enabled ? windowStartNanos : 0;
+    }
+
     public static void recordGpuMillis(String label, double millis) {
         if (!enabled) {
             return;
@@ -117,11 +121,11 @@ public final class VoxyProfile {
         var gpuRows = new ArrayList<Map.Entry<String, Entry>>(GPU.entrySet());
         gpuRows.sort((a, b) -> Long.compare(b.getValue().nanos.sum(), a.getValue().nanos.sum()));
         double gpuTotalPerFrame = 0;
-        sb.append(String.format("  GPU passes over %,d sampled frames:%n", gpuSamples));
+        int frames = gpuSamples;
+        sb.append(String.format("  GPU passes over %,d sampled frames:%n", frames));
         for (var row : gpuRows) {
             var e = row.getValue();
-            long calls = e.calls.sum();
-            double perFrame = calls == 0 ? 0 : (e.nanos.sum() / 1.0e6) / calls;
+            double perFrame = frames == 0 ? 0 : (e.nanos.sum() / 1.0e6) / frames;
             gpuTotalPerFrame += perFrame;
             sb.append(String.format("  %-28s %19.3f ms/frame%n", row.getKey(), perFrame));
         }

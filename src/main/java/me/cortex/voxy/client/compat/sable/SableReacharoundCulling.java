@@ -9,15 +9,17 @@ import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.util.IrisUtil;
 import me.cortex.voxy.client.core.rendering.LodViewState;
 import org.joml.Matrix4f;
+import org.joml.Matrix4d;
 import org.joml.Vector3d;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.IdentityHashMap;
+import java.util.WeakHashMap;
 
 public final class SableReacharoundCulling {
     private static final double HYSTERESIS_BLOCKS = 32.0D;
-    private static final IdentityHashMap<ClientSubLevel, Boolean> SUBPIXEL = new IdentityHashMap<>();
+    // 船体继承对象身份相等；弱键使最后一帧的缓存也不会保活船体及其世界。
+    private static final WeakHashMap<ClientSubLevel, Boolean> SUBPIXEL = new WeakHashMap<>();
     private static final LodViewState VIEW = new LodViewState();
     private static final Matrix4f MVP = new Matrix4f();
     private static long cachedFrame = Long.MIN_VALUE;
@@ -58,10 +60,11 @@ public final class SableReacharoundCulling {
         if (projected) VIEW.set(MVP, target.width, target.height, subdivision, nearDetail);
         var center = new Vector3d();
         var corner = new Vector3d();
+        var distancePose = new Matrix4d();
         double pixels = DistantMeshLod.visibilityPixels(subdivision);
         List<ClientSubLevel> visibleSubLevels = new ArrayList<>();
         for (ClientSubLevel subLevel : subLevels) {
-            if (!isInRenderDistance(subLevel, cameraX, cameraZ, renderDistanceBlocks, center)) continue;
+            if (!isInRenderDistance(subLevel, cameraX, cameraZ, renderDistanceBlocks, center, distancePose)) continue;
             // 无投影的方块实体阶段保守保留，不能沿用另一个视图的小目标结论。
             if (projected) {
                 Boolean small = SUBPIXEL.get(subLevel);
@@ -78,7 +81,7 @@ public final class SableReacharoundCulling {
     }
 
     private static boolean isInRenderDistance(ClientSubLevel subLevel, double cameraX, double cameraZ,
-                                               double renderDistanceBlocks, Vector3d center) {
+                                               double renderDistanceBlocks, Vector3d center, Matrix4d distancePose) {
         BoundingBox3ic bounds = subLevel.getPlot().getBoundingBox();
         if (bounds == null) {
             return true;
@@ -89,15 +92,20 @@ public final class SableReacharoundCulling {
                 (bounds.minY() + bounds.maxY() + 1) * 0.5D,
                 (bounds.minZ() + bounds.maxZ() + 1) * 0.5D
         );
-        subLevel.renderPose().transformPosition(center);
+        var pose = subLevel.renderPose().bakeIntoMatrix(distancePose);
+        pose.transformPosition(center);
 
         double halfWidth = Math.max(0.5D, bounds.width() * 0.5D);
+        double halfHeight = Math.max(0.5D, ((double) bounds.maxY() - bounds.minY() + 1) * 0.5D);
         double halfLength = Math.max(0.5D, bounds.length() * 0.5D);
-        double horizontalRadius = Math.sqrt(halfWidth * halfWidth + halfLength * halfLength);
-
-        double dx = center.x - cameraX;
-        double dz = center.z - cameraZ;
-        return (dx * dx + dz * dz) <= (renderDistanceBlocks + horizontalRadius) * (renderDistanceBlocks + horizontalRadius);
+        // 绝对线性变换得到世界包围盒半径，倾斜高度也计入水平范围。
+        double extentX = Math.abs(pose.m00()) * halfWidth + Math.abs(pose.m10()) * halfHeight
+                + Math.abs(pose.m20()) * halfLength;
+        double extentZ = Math.abs(pose.m02()) * halfWidth + Math.abs(pose.m12()) * halfHeight
+                + Math.abs(pose.m22()) * halfLength;
+        double dx = Math.max(0.0D, Math.abs(center.x - cameraX) - extentX);
+        double dz = Math.max(0.0D, Math.abs(center.z - cameraZ) - extentZ);
+        return (dx * dx + dz * dz) <= renderDistanceBlocks * renderDistanceBlocks;
     }
 
     private static boolean isSubpixel(ClientSubLevel subLevel, double cx, double cy, double cz,

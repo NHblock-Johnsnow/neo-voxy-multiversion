@@ -69,15 +69,7 @@ public abstract class VoxyConfigScreenPages {
                         }, s -> s.enabled)
                         .setFlags(OptionFlag.REQUIRES_RENDERER_RELOAD)
                         .build())
-                .add(OptionImpl.createBuilder(int.class, storage)
-                        .setName(Component.translatable("voxy.config.general.earthCurveRatio"))
-                        .setTooltip(Component.translatable("voxy.config.general.earthCurveRatio.tooltip"))
-                        .setControl(option -> new SliderControl(option, 0, 10000, 50,
-                                value -> Component.literal(value == 0 ? "Off" : Integer.toString(value))))
-                        .setBinding((s, value) -> s.earthCurveRatio = value, s -> s.earthCurveRatio)
-                        .setImpact(OptionImpact.LOW)
-                        .setFlags(OptionFlag.REQUIRES_RENDERER_RELOAD)
-                        .build())
+
                 .build());
 
         groups.add(OptionGroup.createBuilder()
@@ -128,7 +120,7 @@ public abstract class VoxyConfigScreenPages {
                         .build())
                 .build());
 
-        return page("voxy.config.group.general", groups);
+        return page("voxy.config.general", groups);
     }
 
     private static OptionPage renderingPage(VoxyConfig storage) {
@@ -205,14 +197,12 @@ public abstract class VoxyConfigScreenPages {
                         .setFlags(OptionFlag.REQUIRES_RENDERER_RELOAD)
                         .build())
                 .add(OptionImpl.createBuilder(int.class, storage)
-                        .setName(Component.translatable("voxy.config.general.biomeBlendRadius"))
-                        .setTooltip(Component.translatable("voxy.config.general.biomeBlendRadius.tooltip"))
-                        .setControl(option -> new SliderControl(option, 0, 7, 1,
-                                value -> value == 0
-                                        ? Component.translatable("voxy.config.general.biomeBlendRadius.off")
-                                        : Component.literal(Integer.toString(value))))
-                        .setBinding((s, value) -> s.biomeBlendRadius = value, s -> s.biomeBlendRadius)
-                        .setImpact(OptionImpact.MEDIUM)
+                        .setName(Component.translatable("voxy.config.general.earthCurveRatio"))
+                        .setTooltip(Component.translatable("voxy.config.general.earthCurveRatio.tooltip"))
+                        .setControl(option -> new SliderControl(option, 0, 10000, 50,
+                                value -> Component.literal(Integer.toString(value))))
+                        .setBinding((s, value) -> s.earthCurveRatio = value, s -> s.earthCurveRatio)
+                        .setImpact(OptionImpact.LOW)
                         .setFlags(OptionFlag.REQUIRES_RENDERER_RELOAD)
                         .build())
                 .build());
@@ -226,8 +216,8 @@ public abstract class VoxyConfigScreenPages {
                 .build();
         groups.add(OptionGroup.createBuilder()
                 .add(OptionImpl.createBuilder(boolean.class, storage)
-                        .setName(Component.translatable("voxy.config.general.render_fog"))
-                        .setTooltip(Component.translatable("voxy.config.general.render_fog.tooltip"))
+                        .setName(Component.translatable("voxy.config.general.environmental_fog"))
+                        .setTooltip(Component.translatable("voxy.config.general.environmental_fog.tooltip"))
                         .setControl(TickBoxControl::new)
                         .setBinding((s, value) -> s.useEnvironmentalFog = value, s -> s.useEnvironmentalFog)
                         .setImpact(OptionImpact.LOW)
@@ -252,7 +242,7 @@ public abstract class VoxyConfigScreenPages {
                 .add(OptionImpl.createBuilder(int.class, storage)
                         .setName(Component.translatable("voxy.config.general.cloudDistance"))
                         .setTooltip(Component.translatable("voxy.config.general.cloudDistance.tooltip"))
-                        .setEnabled(!adaptCloudDistance.getValue())
+                        .setEnabledPredicate(() -> !adaptCloudDistance.getValue())
                         .setControl(option -> new SliderControl(option, 0, 2048, 2, value ->
                                 adaptCloudDistance.getValue()
                                         ? Component.translatable("voxy.config.general.adaptive")
@@ -266,35 +256,77 @@ public abstract class VoxyConfigScreenPages {
 
         groups.add(OptionGroup.createBuilder()
                 .add(OptionImpl.createBuilder(int.class, storage)
-                        .setName(Component.translatable("voxy.config.general.skyFogDistance"))
-                        .setTooltip(Component.translatable("voxy.config.general.skyFogDistance.tooltip"))
-                        .setControl(option -> new SliderControl(option, 16, 512, 16,
-                                value -> Component.literal(Integer.toString(value))))
-                        .setBinding((s, value) -> s.skyFogDistance = value, s -> s.skyFogDistance)
-                        .build())
-                .add(OptionImpl.createBuilder(int.class, storage)
                         .setName(Component.translatable("voxy.config.general.fogIntensity"))
                         .setTooltip(Component.translatable("voxy.config.general.fogIntensity.tooltip"))
-                        .setControl(option -> new SliderControl(option, 0, 100, 5,
-                                value -> Component.literal(String.format("%.2f", value / 100.0f))))
+                        .setControl(option -> new SliderControl(option, 0, 100, 1,
+                                value -> Component.literal(Integer.toString(value))))
                         .setBinding((s, value) -> s.fogIntensity = value / 100.0f,
-                                s -> (int) (s.fogIntensity * 100))
+                                s -> Math.round(s.fogIntensity * 100))
                         .build())
                 .add(OptionImpl.createBuilder(int.class, storage)
                         .setName(Component.translatable("voxy.config.general.fogDensity"))
                         .setTooltip(Component.translatable("voxy.config.general.fogDensity.tooltip"))
-                        .setControl(option -> new SliderControl(option, 0, 100, 5,
-                                value -> Component.literal(String.format("%.2f", value / 100.0f))))
+                        .setControl(option -> new SliderControl(option, 0, 100, 1,
+                                value -> Component.literal(Integer.toString(value))))
                         .setBinding((s, value) -> s.fogDensity = value / 100.0f,
-                                s -> (int) (s.fogDensity * 100))
+                                s -> Math.round(s.fogDensity * 100))
                         .build())
                 .add(OptionImpl.createBuilder(int.class, storage)
-                        .setName(Component.translatable("voxy.config.general.fogDistancePercent"))
-                        .setTooltip(Component.translatable("voxy.config.general.fogDistancePercent.tooltip"))
+                        .setName(Component.translatable("voxy.config.general.skyFogDistance"))
+                        .setTooltip(Component.translatable("voxy.config.general.skyFogDistance.tooltip"))
+                        .setControl(option -> new SliderControl(option, 0, 1024, 1,
+                                value -> Component.literal(Integer.toString(value))))
+                        .setBinding((s, value) -> s.skyFogDistance = value, s -> s.skyFogDistance)
+                        .build())
+                .add(OptionImpl.createBuilder(int.class, storage)
+                        .setName(Component.translatable("voxy.config.general.fog_distance"))
+                        .setTooltip(Component.translatable("voxy.config.general.fog_distance.tooltip"))
                         .setControl(option -> new SliderControl(option, 5, 200, 5,
                                 value -> Component.literal(value + "%")))
                         .setBinding((s, value) -> s.fogDistancePercent = value,
                                 s -> s.fogDistancePercent)
+                        .setImpact(OptionImpact.LOW)
+                        .build())
+                .build());
+
+        groups.add(OptionGroup.createBuilder()
+                .add(OptionImpl.createBuilder(int.class, storage)
+                        .setName(Component.translatable("voxy.config.general.biomeBlendRadius"))
+                        .setTooltip(Component.translatable("voxy.config.general.biomeBlendRadius.tooltip"))
+                        .setControl(option -> new SliderControl(option, 0, 7, 1,
+                                value -> value == 0
+                                        ? Component.translatable("voxy.config.general.biomeBlendRadius.off")
+                                        : Component.literal(Integer.toString(value))))
+                        .setBinding((s, value) -> s.biomeBlendRadius = value, s -> s.biomeBlendRadius)
+                        .setImpact(OptionImpact.MEDIUM)
+                        .setFlags(OptionFlag.REQUIRES_RENDERER_RELOAD)
+                        .build())
+                .add(OptionImpl.createBuilder(boolean.class, storage)
+                        .setName(Component.translatable("voxy.config.general.biomeBlendGrass"))
+                        .setTooltip(Component.translatable("voxy.config.general.biomeBlendGrass.tooltip"))
+                        .setControl(TickBoxControl::new)
+                        .setBinding((s, value) -> s.biomeBlendScope = value ? "water_grass" : "water",
+                                s -> "water_grass".equals(s.biomeBlendScope))
+                        .setImpact(OptionImpact.MEDIUM)
+                        .setFlags(OptionFlag.REQUIRES_RENDERER_RELOAD)
+                        .build())
+                .build());
+
+        groups.add(OptionGroup.createBuilder()
+                .add(OptionImpl.createBuilder(boolean.class, storage)
+                        .setName(Component.translatable("voxy.config.compat.distantBeacons"))
+                        .setTooltip(Component.translatable("voxy.config.compat.distantBeacons.tooltip"))
+                        .setControl(TickBoxControl::new)
+                        .setBinding((s, value) -> s.distantBeacons = value, s -> s.distantBeacons)
+                        .setImpact(OptionImpact.LOW)
+                        .build())
+                .add(OptionImpl.createBuilder(int.class, storage)
+                        .setName(Component.translatable("voxy.config.compat.distantBeaconDistance"))
+                        .setTooltip(Component.translatable("voxy.config.compat.distance.tooltip"))
+                        .setControl(option -> new SliderControl(option, 0, 512, 8,
+                                VoxyConfigScreenPages::formatCompatDistance))
+                        .setBinding((s, value) -> s.distantBeaconMaxChunks = value,
+                                s -> s.distantBeaconMaxChunks)
                         .setImpact(OptionImpact.LOW)
                         .build())
                 .build());
@@ -320,7 +352,7 @@ public abstract class VoxyConfigScreenPages {
                 .add(OptionImpl.createBuilder(int.class, storage)
                         .setName(Component.translatable("voxy.config.fakesight.distance"))
                         .setTooltip(Component.translatable("voxy.config.fakesight.distance.tooltip"))
-                        .setControl(option -> new SliderControl(option, 8, 48, 1,
+                        .setControl(option -> new SliderControl(option, VoxyConfig.MIN_REQUEST_DISTANCE, VoxyConfig.MAX_REQUEST_DISTANCE, 1,
                                 value -> Component.literal(Integer.toString(value))))
                         .setBinding((s, value) -> {
                             s.requestDistance = value;
@@ -336,31 +368,26 @@ public abstract class VoxyConfigScreenPages {
 
     private static OptionPage compatibilityPage(VoxyConfig storage) {
         List<OptionGroup> groups = new ArrayList<>();
-        groups.add(OptionGroup.createBuilder()
-                .add(OptionImpl.createBuilder(boolean.class, storage)
-                        .setName(Component.translatable("voxy.config.compat.beacons"))
-                        .setTooltip(Component.translatable("voxy.config.compat.beacons.tooltip"))
-                        .setControl(TickBoxControl::new)
-                        .setBinding((s, value) -> s.distantBeacons = value, s -> s.distantBeacons)
-                        .setImpact(OptionImpact.LOW)
-                        .build())
-                .add(OptionImpl.createBuilder(int.class, storage)
-                        .setName(Component.translatable("voxy.config.compat.beaconDistance"))
-                        .setTooltip(Component.translatable("voxy.config.compat.distance.tooltip"))
-                        .setControl(option -> new SliderControl(option, 0, 512, 8,
-                                VoxyConfigScreenPages::formatCompatDistance))
-                        .setBinding((s, value) -> s.distantBeaconMaxChunks = value,
-                                s -> s.distantBeaconMaxChunks)
-                        .setImpact(OptionImpact.LOW)
-                        .build())
-                .build());
+
 
         if (net.minecraftforge.fml.ModList.get().isLoaded("create")) {
             groups.add(OptionGroup.createBuilder()
-                    .add(createToggle(storage, "voxy.config.compat.createContraptions",
+                    .add(createToggle(storage, "voxy.config.compat.distantTrains",
+                            value -> storage.distantTrains = value,
+                            () -> storage.distantTrains))
+                    .add(createDistance(storage, "voxy.config.compat.distantTrainDistance",
+                            value -> storage.distantTrainMaxChunks = value,
+                            () -> storage.distantTrainMaxChunks))
+                    .add(createToggle(storage, "voxy.config.compat.distantTracks",
+                            value -> storage.distantTracks = value,
+                            () -> storage.distantTracks))
+                    .add(createDistance(storage, "voxy.config.compat.distantTrackDistance",
+                            value -> storage.distantTrackMaxChunks = value,
+                            () -> storage.distantTrackMaxChunks))
+                    .add(createToggle(storage, "voxy.config.compat.distantContraptions",
                             value -> storage.distantContraptions = value,
                             () -> storage.distantContraptions))
-                    .add(createDistance(storage, "voxy.config.compat.createContraptionDistance",
+                    .add(createDistance(storage, "voxy.config.compat.distantContraptionDistance",
                             value -> storage.distantContraptionMaxChunks = value,
                             () -> storage.distantContraptionMaxChunks))
                     .add(createToggle(storage, "voxy.config.compat.createKinetics",
@@ -369,18 +396,6 @@ public abstract class VoxyConfigScreenPages {
                     .add(createDistance(storage, "voxy.config.compat.createKineticDistance",
                             value -> storage.distantKineticMaxChunks = value,
                             () -> storage.distantKineticMaxChunks))
-                    .add(createToggle(storage, "voxy.config.compat.createTrains",
-                            value -> storage.distantTrains = value,
-                            () -> storage.distantTrains))
-                    .add(createDistance(storage, "voxy.config.compat.createTrainDistance",
-                            value -> storage.distantTrainMaxChunks = value,
-                            () -> storage.distantTrainMaxChunks))
-                    .add(createToggle(storage, "voxy.config.compat.createTracks",
-                            value -> storage.distantTracks = value,
-                            () -> storage.distantTracks))
-                    .add(createDistance(storage, "voxy.config.compat.createTrackDistance",
-                            value -> storage.distantTrackMaxChunks = value,
-                            () -> storage.distantTrackMaxChunks))
                     .build());
         }
         return page("voxy.config.compat", groups);
@@ -413,8 +428,8 @@ public abstract class VoxyConfigScreenPages {
 
     private static Component formatCompatDistance(int value) {
         return value == 0
-                ? Component.translatable("voxy.config.compat.lodDistance")
-                : Component.literal(Integer.toString(value));
+                ? Component.translatable("voxy.config.compat.distanceFollowLod")
+                : Component.translatable("voxy.config.compat.distanceChunks", value);
     }
 
     private static OptionPage page(String key, List<OptionGroup> groups) {

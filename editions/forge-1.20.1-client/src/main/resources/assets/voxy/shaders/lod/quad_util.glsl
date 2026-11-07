@@ -94,8 +94,8 @@ uvec3 makeRemainingAttributes(const in BlockModel model, const in Quad quad, uin
 
     if (modelHasBiomeLUT(model)) {
         tintColour = quadUsesBlendPalette(quad) != 0u
-                ? colourData[57344u + extractBlendIdx(quad)]
-                : colourData[tintColour + extractBiomeId(quad)];
+                ? colourData[modelIsFluid(model) ? 8192u + extractBiomeId(quad) : extractBlendIdx(quad)]
+                : colourData[8704u + tintColour + extractBiomeId(quad)];
     }
 
     #ifdef PATCHED_SHADER

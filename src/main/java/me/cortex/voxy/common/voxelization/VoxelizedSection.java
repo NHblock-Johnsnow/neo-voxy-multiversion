@@ -10,8 +10,15 @@ public class VoxelizedSection {
     public int z;
     public int lvl0NonAirCount;
     public final long[] section;
+    private long[] mipScratch;
     public VoxelizedSection(long[] section) {
         this.section = section;
+    }
+
+    // 保留 L1..L3 原值；局部解析只给下一级采样，缓冲由 ingest worker 复用。
+    long[] mipScratch() {
+        if (this.mipScratch == null) this.mipScratch = new long[512 + 64 + 8];
+        return this.mipScratch;
     }
 
     public static int getBaseIndexForLevel(int lvl) {

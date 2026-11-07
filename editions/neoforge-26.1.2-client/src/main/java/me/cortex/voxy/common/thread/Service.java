@@ -1,5 +1,6 @@
 package me.cortex.voxy.common.thread;
 
+import me.cortex.voxy.common.util.ExceptionCleanup;
 import java.util.concurrent.Semaphore;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
@@ -34,14 +35,13 @@ public class Service {
    }
 
    boolean runJob() {
-      if (this.isStopping || !this.isLive) {
-         return false;
-      } else if (!this.tasks.tryAcquire()) {
-         return false;
-      } else if (!this.executor.run()) {
-         throw new IllegalStateException("Executor failed to run");
-      } else {
-         return true;
+      if (this.isStopping || !this.isLive || !this.tasks.tryAcquire()) return false;
+      try {
+          if (!this.executor.run()) throw new IllegalStateException("Executor failed to run");
+          return true;
+      } finally {
+          // 已取得的任务许可，无论执行结果如何都要归还全局计数。
+          this.sm.remJobs(1);
       }
    }
 
@@ -66,17 +66,16 @@ public class Service {
    }
 
    public int shutdown() {
-      if (this.isStopping) {
-         throw new IllegalStateException("Service not live");
-      } else {
-         this.isStopping = true;
-         this.sm.removeService(this);
-         this.executor.shutdown();
-         int remaining = this.tasks.drainPermits();
-         this.isLive = false;
-         this.sm.remJobs(remaining);
-         return remaining;
-      }
+      if (this.isStopping) throw new IllegalStateException("Service not live");
+      this.isStopping = true;
+      var cleanup = new ExceptionCleanup(null);
+      cleanup.run(() -> this.sm.removeService(this));
+      cleanup.run(this.executor::shutdown);
+      int remaining = this.tasks.drainPermits();
+      this.isLive = false;
+      cleanup.run(() -> this.sm.remJobs(remaining));
+      cleanup.rethrow();
+      return remaining;
    }
 
    public boolean steal() {

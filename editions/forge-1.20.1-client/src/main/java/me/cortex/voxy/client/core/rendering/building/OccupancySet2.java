@@ -3,8 +3,6 @@ package me.cortex.voxy.client.core.rendering.building;
 import org.lwjgl.system.MemoryUtil;
 
 import java.util.Arrays;
-import java.util.BitSet;
-import java.util.Random;
 
 //16x16x16 occupancy set
 public class OccupancySet2 {
@@ -78,20 +76,5 @@ public class OccupancySet2 {
         }
     }
 
-    public static void main(String[] args) {
-        for (int q = 0; q < 1000; q++) {
-            var o = new OccupancySet2();
-            var r = new Random(12523532643L*q);
-            var bs = new BitSet(16 * 16 * 16);
-            for (int i = 0; i < 5000; i++) {
-                int p = r.nextInt(16 * 16 * 16);
-                o.set(p);
-                bs.set(p);
 
-                for (int j = 0; j < 16 * 16 * 16; j++) {
-                    if (o.get(j) != bs.get(j)) throw new IllegalStateException();
-                }
-            }
-        }
-    }
 }

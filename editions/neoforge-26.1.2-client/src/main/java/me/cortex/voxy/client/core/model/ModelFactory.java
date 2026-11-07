@@ -258,19 +258,26 @@ public class ModelFactory {
    public void processUploads(long totalBudgetNanos) {
       ModelFactory.ResultUploader upload = this.uploadResults.poll();
       if (upload != null) {
-         long deadline = System.nanoTime() + Math.max(0L, totalBudgetNanos);
+         long started = System.nanoTime();
+         long budget = Math.max(0L, totalBudgetNanos);
          GL11.glPixelStorei(3314, 0);
          GL11.glPixelStorei(3316, 0);
          GL11.glPixelStorei(3315, 0);
          GL11.glPixelStorei(3317, 4);
 
-         do {
-            upload.upload(this.storage);
-            upload.free();
-            upload = this.uploadResults.poll();
-         } while (upload != null && System.nanoTime() < deadline);
-
-         UploadStream.INSTANCE.commit();
+         try {
+            do {
+               try {
+                  upload.upload(this.storage);
+               } finally {
+                  upload.free();
+               }
+               // 预算耗尽后不再出队，剩余结果留待下一帧处理。
+            } while (System.nanoTime() - started < budget
+               && (upload = this.uploadResults.poll()) != null);
+         } finally {
+            UploadStream.INSTANCE.commit();
+         }
       }
    }
 
@@ -350,10 +357,10 @@ public class ModelFactory {
 
                float[] depths = computeModelDepth(textureData, possibleDuplicate, layer != ChunkSectionLayer.SOLID ? 3 : 1);
                if (centeredGroundCross) {
-                  depths[Direction.NORTH.ordinal()] = 0.5F;
-                  depths[Direction.SOUTH.ordinal()] = 0.5F;
-                  depths[Direction.WEST.ordinal()] = 0.5F;
-                  depths[Direction.EAST.ordinal()] = 0.5F;
+                  for (Direction direction : Direction.Plane.HORIZONTAL) {
+                     int face = direction.ordinal();
+                     if (depths[face] >= -0.1F) depths[face] = 0.5F;
+                  }
                }
                boolean needsDoubleSidedQuads = depths[0] < -0.1 && depths[1] < -0.1
                   || depths[2] < -0.1 && depths[3] < -0.1
@@ -461,6 +468,7 @@ public class ModelFactory {
                modelFlags |= isFluid && blockState.getFluidState().is(FluidTags.LAVA) ? 64 : 0;
                modelFlags |= leafModel ? 128 : 0;
                modelFlags |= fluidHeight << 8;
+               modelFlags |= isFluid ? (1 << 12) : 0;
                MemoryUtil.memPutInt(uploadPtr, modelFlags);
                uploadPtr += 4L;
                if (tintSources == null) {
@@ -469,7 +477,6 @@ public class ModelFactory {
                   MemoryUtil.memPutInt(uploadPtr, entry.tintingColour);
                } else {
                   int biomeIndex = this.modelsRequiringBiomeColours.size() * this.biomes.size();
-                  if (biomeIndex + this.biomes.size() > BiomeBlendPalette.PALETTE_BASE) this.blendPalette.disable();
                   MemoryUtil.memPutInt(uploadPtr, biomeIndex);
                   this.modelsRequiringBiomeColours.add(new Pair<>(modelId, blockState));
                   if (!this.biomes.isEmpty()) {
@@ -572,7 +579,7 @@ public class ModelFactory {
                }
             }
 
-            if (this.modelsRequiringBiomeColours.size() * this.biomes.size() > BiomeBlendPalette.PALETTE_BASE) this.blendPalette.disable();
+
             this.blendPalette.mirrorRebuild(result.modelBiomeIndexPairs.address,
                this.modelsRequiringBiomeColours.size(), result.biomeColourBuffer.address,
                (int)(result.biomeColourBuffer.size / 4L), this.biomes.size());
@@ -794,11 +801,12 @@ public class ModelFactory {
 
       @Override
       public void upload(ModelStore store) {
+         store.ensureBiomeColourCapacity(this.biomeColourBuffer.size / 4);
          this.upload(store.modelBuffer, store.modelColourBuffer);
       }
 
       public void upload(GlBuffer modelBuffer, GlBuffer modelColourBuffer) {
-         this.biomeColourBuffer.cpyTo(UploadStream.INSTANCE.upload(modelColourBuffer, 0L, this.biomeColourBuffer.size));
+         this.biomeColourBuffer.cpyTo(UploadStream.INSTANCE.upload(modelColourBuffer, BiomeBlendPalette.NORMAL_COLOUR_BASE * 4L, this.biomeColourBuffer.size));
          long ptr = this.modelBiomeIndexPairs.address;
 
          for (long offset = 0L; offset < this.modelBiomeIndexPairs.size; offset += 8L) {
@@ -833,13 +841,16 @@ public class ModelFactory {
 
       @Override
       public void upload(ModelStore store) {
+         if (this.biomeUploadIndex != -1) {
+            store.ensureBiomeColourCapacity(this.biomeUploadIndex + this.biomeUpload.size / 4);
+         }
          this.upload(store.modelBuffer, store.modelColourBuffer, store.textures);
       }
 
       public void upload(GlBuffer modelBuffer, GlBuffer colourBuffer, GlTexture atlas) {
          this.model.cpyTo(UploadStream.INSTANCE.upload(modelBuffer, this.modelId * 64L, 64L));
          if (this.biomeUploadIndex != -1) {
-            this.biomeUpload.cpyTo(UploadStream.INSTANCE.upload(colourBuffer, this.biomeUploadIndex * 4L, this.biomeUpload.size));
+            this.biomeUpload.cpyTo(UploadStream.INSTANCE.upload(colourBuffer, (BiomeBlendPalette.NORMAL_COLOUR_BASE + this.biomeUploadIndex) * 4L, this.biomeUpload.size));
             this.biomeUploadIndex = -1;
             this.biomeUpload.free();
             this.biomeUpload = null;

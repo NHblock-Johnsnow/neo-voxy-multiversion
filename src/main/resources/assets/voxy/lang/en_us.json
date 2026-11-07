@@ -66,7 +66,7 @@
   "voxy.config.general.fogDensity": "Fog transition",
   "voxy.config.general.fogDensity.tooltip": "Shapes the fog falloff curve - higher values make the transition more extreme (clear up close, ramping up sharply near the fog distance). 0 is a uniform linear fade",
   "voxy.config.general.skyFogDistance": "Sky fog distance",
-  "voxy.config.general.skyFogDistance.tooltip": "End distance for sky and LOD terrain fog, in chunks",
+  "voxy.config.general.skyFogDistance.tooltip": "End distance for sky fog, in chunks",
   "voxy.config.general.fog_distance": "Fog distance",
   "voxy.config.general.fog_distance.tooltip": "Scales voxy's LOD fog distance (100% = fog reaches full at the render edge). Higher = see further before the distant LOD fades to the sky colour.",
   "voxy.config.fakesight": "Extended Chunk Request",

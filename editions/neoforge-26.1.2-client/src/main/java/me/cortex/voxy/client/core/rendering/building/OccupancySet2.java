@@ -1,8 +1,6 @@
 package me.cortex.voxy.client.core.rendering.building;
 
 import java.util.Arrays;
-import java.util.BitSet;
-import java.util.Random;
 import org.lwjgl.system.MemoryUtil;
 
 public class OccupancySet2 {
@@ -86,23 +84,5 @@ public class OccupancySet2 {
       }
    }
 
-   public static void main(String[] args) {
-      for (int q = 0; q < 1000; q++) {
-         OccupancySet2 o = new OccupancySet2();
-         Random r = new Random(12523532643L * q);
-         BitSet bs = new BitSet(4096);
 
-         for (int i = 0; i < 5000; i++) {
-            int p = r.nextInt(4096);
-            o.set(p);
-            bs.set(p);
-
-            for (int j = 0; j < 4096; j++) {
-               if (o.get(j) != bs.get(j)) {
-                  throw new IllegalStateException();
-               }
-            }
-         }
-      }
-   }
 }

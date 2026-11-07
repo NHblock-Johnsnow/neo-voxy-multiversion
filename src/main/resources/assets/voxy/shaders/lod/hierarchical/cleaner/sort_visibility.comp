@@ -18,7 +18,7 @@ layout(binding = OUTPUT_BUFFER_BINDING, std430) restrict volatile buffer Minimum
 
 //Returns the id of the max value
 uint atomicDerefMaxExchangeGlobal(uint atId, uint id) {
-    const uint value = visibility[id];
+    const uint value = visibility[id & 0x7FFFFFFFu];
     while (true) {
         const uint existingId = minVisIds[atId];
         if (existingId == id) {//If we are trying to insert self, return -1
@@ -55,7 +55,7 @@ shared uint initalSort[OUTPUT_SIZE];
 
 //Returns the id of the max value
 uint atomicDerefMaxExchangeLocal(uint atId, uint id) {
-    const uint value = visibility[id];
+    const uint value = visibility[id & 0x7FFFFFFFu];
     while (true) {
         const uint existingId = initalSort[atId];
         if (existingId == id) {//If we are trying to insert self, return -1
@@ -79,12 +79,15 @@ uint atomicDerefMaxExchangeLocal(uint atId, uint id) {
 void bubbleSortInital(uint vis, uint id) {
     uint start = 0;
     //Fast path cut out half the ops
-    if (visibility[initalSort[(OUTPUT_SIZE-1)>>1]] <= vis) {//Check if we are more than half way
+    if (visibility[initalSort[(OUTPUT_SIZE-1)>>1] & 0x7FFFFFFFu] <= vis) {//Check if we are more than half way
         start = (OUTPUT_SIZE-1)>>1;
     }
 
     for (uint i = start; i < OUTPUT_SIZE; i++) {
         id = atomicDerefMaxExchangeLocal(i, id);
+        if (id == uint(-1)) {
+            break;
+        }
     }
 }
 
@@ -119,6 +122,9 @@ void main() {
     //Do insertion and sort into local shared buffer
     for (uint i = 0; i < ELEMS_PER_THREAD; i++) {
         uint id = gl_GlobalInvocationID.x*ELEMS_PER_THREAD+i;
+        if (id >= visibility.length()) {
+            continue;
+        }
         uint vis = visibility[id];
         if (vis == uint(-1)) {
             continue;

@@ -23,6 +23,7 @@ import me.cortex.voxy.commonImpl.compat.create.CreateTrainSampler;
 import me.cortex.voxy.commonImpl.compat.create.DistantTrainProtocol;
 import me.cortex.voxy.compat.far.FarEntityClient;
 import me.cortex.voxy.compat.far.FarEntityProtocol;
+import me.cortex.voxy.compat.far.FarEntityPackets;
 import me.cortex.voxy.compat.far.FarEntityService;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.api.distmarker.Dist;
@@ -62,6 +63,7 @@ public class Voxy {
         modEventBus.addListener(this::registerFarEntityPayloads);
         NeoForge.EVENT_BUS.addListener(farEntityService::onServerTick);
         NeoForge.EVENT_BUS.addListener(farEntityService::onPlayerLoggedOut);
+        NeoForge.EVENT_BUS.addListener(farEntityService::onServerStopped);
     }
 
     /** Create 的采样和网络协议只能在 Create 存在时触碰，避免可选类提前加载。 */
@@ -104,6 +106,8 @@ public class Voxy {
         LodPipelineHooks.register(trainRenderer);
         LodPipelineHooks.frameDebugProbe = DistantOcclusionDebug.PROBE;
         DistantTrainRenderer.bogeyMeshProvider = me.cortex.voxy.client.compat.create.DistantBogeyMeshes::getOrCapture;
+        DistantTrainRenderer.bogeyMeshCaptureActive = me.cortex.voxy.client.compat.create.DistantBogeyMeshes::isCapturing;
+        DistantTrainRenderer.bogeyMeshResetter = me.cortex.voxy.client.compat.create.DistantBogeyMeshes::clear;
 
         var trackRenderer = new DistantTrackRenderer();
         NeoForge.EVENT_BUS.register(trackRenderer);
@@ -159,13 +163,14 @@ public class Voxy {
 
     /** Create 服务端向客户端发送远景列车和动态结构状态。 */
     private static void registerPayloads(RegisterPayloadHandlersEvent event) {
+        if (!ModList.get().isLoaded("create")) return;
         var registrar = event.registrar("1").optional();
         registrar.playToClient(
                 DistantTrainProtocol.CarriageShapePayload.TYPE,
                 DistantTrainProtocol.CarriageShapePayload.CODEC,
                 (payload, context) -> {
                     if (FMLLoader.getDist() == Dist.CLIENT) {
-                        context.enqueueWork(() -> DistantTrainManager.handleShape(payload));
+                        context.enqueueWork(() -> DistantTrainManager.handlePacket(context.connection(), payload));
                     }
                 });
         registrar.playToClient(
@@ -173,7 +178,15 @@ public class Voxy {
                 DistantTrainProtocol.TrainPosesPayload.CODEC,
                 (payload, context) -> {
                     if (FMLLoader.getDist() == Dist.CLIENT) {
-                        context.enqueueWork(() -> DistantTrainManager.handlePoses(payload));
+                        context.enqueueWork(() -> DistantTrainManager.handlePacket(context.connection(), payload));
+                    }
+                });
+        registrar.playToClient(
+                me.cortex.voxy.commonImpl.compat.create.DistantTrainPackets.FragmentPayload.TYPE,
+                me.cortex.voxy.commonImpl.compat.create.DistantTrainPackets.FragmentPayload.CODEC,
+                (payload, context) -> {
+                    if (FMLLoader.getDist() == Dist.CLIENT) {
+                        context.enqueueWork(() -> DistantTrainManager.handlePacket(context.connection(), payload));
                     }
                 });
         registrar.playToClient(
@@ -202,11 +215,19 @@ public class Voxy {
             registrar.playToClient(
                     FarEntityProtocol.PlayersPayload.TYPE,
                     FarEntityProtocol.PlayersPayload.STREAM_CODEC,
-                    (payload, context) -> context.enqueueWork(() -> FarEntityClient.handle(payload.batch())));
+                    (payload, context) -> context.enqueueWork(() -> FarEntityClient.handlePacket(context.connection(), payload)));
+            registrar.playToClient(
+                    FarEntityPackets.FragmentPayload.TYPE,
+                    FarEntityPackets.FragmentPayload.CODEC,
+                    (payload, context) -> context.enqueueWork(() -> FarEntityClient.handlePacket(context.connection(), payload)));
         } else {
             registrar.playToClient(
                     FarEntityProtocol.PlayersPayload.TYPE,
                     FarEntityProtocol.PlayersPayload.STREAM_CODEC,
+                    (payload, context) -> { });
+            registrar.playToClient(
+                    FarEntityPackets.FragmentPayload.TYPE,
+                    FarEntityPackets.FragmentPayload.CODEC,
                     (payload, context) -> { });
         }
     }

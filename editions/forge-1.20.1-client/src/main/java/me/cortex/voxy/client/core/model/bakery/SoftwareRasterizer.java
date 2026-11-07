@@ -34,6 +34,7 @@ public class SoftwareRasterizer {
     private final Vector3f a2 = new Vector3f();
     private final Vector3f a3 = new Vector3f();
     private int quadColour;
+    private boolean uniformColour;
 
     private static final long DEPTH_MASK = ((1L<<24)-1)<<(64-24);
     private static final long CLEAR_VALUE = DEPTH_MASK;//set the depth to max value and rest of bits to 0
@@ -94,7 +95,12 @@ public class SoftwareRasterizer {
         loadTransformPos(transform, addr, 1, this.scratch2, this.qmuv2);
         loadTransformPos(transform, addr, 2, this.scratch3, this.qmuv3);
         loadTransformPos(transform, addr, 3, this.scratch4, this.qmuv4);
-        this.quadColour = MemoryUtil.memGetInt(addr + 24);
+        int c0 = MemoryUtil.memGetInt(addr + 24);
+        int c1 = MemoryUtil.memGetInt(addr + ReuseVertexConsumer.VERTEX_FORMAT_SIZE + 24);
+        int c2 = MemoryUtil.memGetInt(addr + ReuseVertexConsumer.VERTEX_FORMAT_SIZE * 2L + 24);
+        int c3 = MemoryUtil.memGetInt(addr + ReuseVertexConsumer.VERTEX_FORMAT_SIZE * 3L + 24);
+        this.quadColour = c0;
+        this.uniformColour = ((c0 ^ c1) | (c0 ^ c2) | (c0 ^ c3)) == 0;
 
 
         //0,1,2 | 2,3,0
@@ -104,17 +110,17 @@ public class SoftwareRasterizer {
         this.a1.set(this.qmuv1);
         this.a2.set(this.qmuv2);
         this.a3.set(this.qmuv3);
-        this.rasterTriangle(false);
+        this.rasterTriangle(false, c0, c1, c2);
         this.scratchR1.set(this.scratch3);
         this.scratchR2.set(this.scratch4);
         this.scratchR3.set(this.scratch1);
         this.a1.set(this.qmuv3);
         this.a2.set(this.qmuv4);
         this.a3.set(this.qmuv1);
-        this.rasterTriangle(true);
+        this.rasterTriangle(true, c2, c3, c0);
     }
 
-    private void rasterTriangle(boolean orZero) {
+    private void rasterTriangle(boolean orZero, int c1, int c2, int c3) {
         Vector3f v1 = this.scratchR1;
         Vector3f v2 = this.scratchR2;
         Vector3f v3 = this.scratchR3;
@@ -161,13 +167,13 @@ public class SoftwareRasterizer {
                     //Dont need to worry about perspective correction afak as it should already be all correct
 
                     //pixel is inside the triangle
-                    this.rasterPixel(px+py*this.targetSize, w1, w2, w3);
+                    this.rasterPixel(px+py*this.targetSize, w1, w2, w3, c1, c2, c3);
                 }
             }
         }
     }
 
-    private void rasterPixel(int index, float b1, float b2, float b3) {//Barry coords
+    private void rasterPixel(int index, float b1, float b2, float b3, int c1, int c2, int c3) {//Barry coords
         float z = Math.fma(b1, this.scratchR1.z, Math.fma(b2, this.scratchR2.z, b3 * this.scratchR3.z));
         z = Math.fma(z,0.5f,0.5f);
         if (z<0.0f && -0.000001f<=z) z = 0;//Clamp to 0 if its really small negative
@@ -181,8 +187,9 @@ public class SoftwareRasterizer {
         float v = Math.fma(b1, this.a1.z, Math.fma(b2, this.a2.z, b3 * this.a3.z));
 
         int colour = this.sampleTexture(u,v);//The ABGR colour of this pixel
-        if (this.quadColour != 0xFFFFFFFF) {
-            colour = multiplyAbgr(colour, this.quadColour);
+        int vertexColour = this.uniformColour ? this.quadColour : interpolateAbgr(c1, c2, c3, b1, b2, b3);
+        if (vertexColour != 0xFFFFFFFF) {
+            colour = multiplyAbgr(colour, vertexColour);
         }
 
 
@@ -237,6 +244,17 @@ public class SoftwareRasterizer {
 
         int blend = ColorMixer.mix(dst, scr, dstAlpha);//addRGB(ColorABGR.mulRGB(scr, 255-dstAlpha),ColorABGR.mulRGB(dst, dstAlpha));
         return blend|(blendAlpha<<24);
+    }
+
+    // 使用与 UV 一致的重心权重；同色 quad 走常量快路径。
+    private static int interpolateAbgr(int c1, int c2, int c3, float b1, float b2, float b3) {
+        int packed = 0;
+        for (int shift = 0; shift < 32; shift += 8) {
+            float channel = Math.fma(b1, (c1 >>> shift) & 255,
+                    Math.fma(b2, (c2 >>> shift) & 255, b3 * ((c3 >>> shift) & 255)));
+            packed |= Math.max(0, Math.min(255, Math.round(channel))) << shift;
+        }
+        return packed;
     }
 
     private static int multiplyAbgr(int base, int tint) {

@@ -44,118 +44,166 @@ public final class ActiveSectionTracker {
       return this.acquire(WorldEngine.getWorldSectionId(lvl, x, y, z), nullOnEmpty);
    }
 
-   public WorldSection acquire(long key, boolean nullOnEmpty) {
-      if (this.engine != null) {
-         this.engine.lastActiveTime = System.currentTimeMillis();
-      }
-
-      int index = this.getCacheArrayIndex(key);
-      Long2ObjectOpenHashMap<ActiveSectionTracker.VolatileHolder<WorldSection>> cache = this.loadedSectionCache[index];
-      StampedLock lock = this.locks[index];
-      ActiveSectionTracker.VolatileHolder<WorldSection> holder = null;
-      boolean isLoader = false;
-      WorldSection section = null;
-      long stamp = lock.readLock();
-      holder = (ActiveSectionTracker.VolatileHolder<WorldSection>)cache.get(key);
-      if (holder != null) {
-         section = holder.obj;
-         if (section != null) {
-            section.acquire();
+    /** 只借用仍由当前 holder 发布的脏区段，不加载或复活旧缓存对象。 */
+    WorldSection acquireForSaveRetry(WorldSection candidate) {
+        int index = this.getCacheArrayIndex(candidate.key);
+        var lock = this.locks[index];
+        long stamp = lock.readLock();
+        try {
+            var holder = this.loadedSectionCache[index].get(candidate.key);
+            return holder != null && holder.obj == candidate && candidate.shouldSave()
+                    && candidate.tryAcquire() ? candidate : null;
+        } finally {
             lock.unlockRead(stamp);
-            return section;
-         }
+        }
+    }
 
-         lock.unlockRead(stamp);
-      } else {
-         holder = new ActiveSectionTracker.VolatileHolder<>();
-         long ws = lock.tryConvertToWriteLock(stamp);
-         if (ws == 0L) {
-            lock.unlockRead(stamp);
-            stamp = lock.writeLock();
-         } else {
-            stamp = ws;
-         }
+    public WorldSection acquire(long key, boolean nullOnEmpty) {
+        //TODO: add optional verification check to ensure this (or other critical systems) arnt being called on the render or server thread
+        if (this.engine != null) this.engine.lastActiveTime = System.currentTimeMillis();
+        int index = this.getCacheArrayIndex(key);
+        var cache = this.loadedSectionCache[index];
+        final var lock = this.locks[index];
+        VolatileHolder<WorldSection> holder = null;
+        boolean isLoader = false;
+        WorldSection section = null;
 
-         ActiveSectionTracker.VolatileHolder<WorldSection> eHolder = (ActiveSectionTracker.VolatileHolder<WorldSection>)cache.putIfAbsent(key, holder);
-         lock.unlockWrite(stamp);
-         if (eHolder == null) {
-            isLoader = true;
-         } else {
-            holder = eHolder;
-         }
-      }
-
-      if (isLoader) {
-         this.loadedSections.incrementAndGet();
-         stamp = lock.readLock();
-         long stampx = this.lruLock.writeLock();
-         section = (WorldSection)this.lruSecondaryCache.remove(key);
-         WorldSection removal = null;
-         if (section == null && !this.lruSecondaryCache.isEmpty() && this.lruSize + 100 < this.lruSecondaryCache.size() + this.getLoadedCacheCount()) {
-            removal = (WorldSection)this.lruSecondaryCache.removeFirst();
-         }
-
-         this.lruLock.unlockWrite(stampx);
-         if (section != null) {
-            section.primeForReuse();
-            section.acquire(1);
-         }
-
-         lock.unlockRead(stamp);
-         if (removal != null) {
-            removal._releaseArray();
-         }
-      } else {
-         ActiveSectionTracker.VolatileHolder.PRE_ACQUIRE_COUNT.getAndAdd((ActiveSectionTracker.VolatileHolder)holder, (int)1);
-      }
-
-      if (isLoader) {
-         int status = 0;
-         if (section == null) {
-            section = new WorldSection(WorldEngine.getLevel(key), WorldEngine.getX(key), WorldEngine.getY(key), WorldEngine.getZ(key), this);
-            status = this.loader.load(section);
-            if (status < 0) {
-               Logger.error("Unable to load section " + section.key + " setting to air");
-               status = 1;
+        {
+            long stamp = lock.readLock();
+            try {
+                holder = cache.get(key);
+                if (holder != null) {//Return already loaded entry
+                    section = holder.obj;
+                    if (section != null) {
+                        section.acquire();
+                        lock.unlockRead(stamp);
+                        stamp = 0;
+                        return section;
+                    }
+                    lock.unlockRead(stamp);
+                    stamp = 0;
+                } else {//Try to create holder
+                    holder = new VolatileHolder<>();
+                    long ws = lock.tryConvertToWriteLock(stamp);
+                    if (ws == 0) {//Failed to convert, unlock read and get write
+                        lock.unlockRead(stamp);
+                        stamp = lock.writeLock();
+                    } else {
+                        stamp = ws;
+                    }
+                    var eHolder = cache.putIfAbsent(key, holder);//We put if absent because on failure to convert to write, it leaves race condition
+                    lock.unlockWrite(stamp);
+                    stamp = 0;
+                    if (eHolder == null) {//We are the loader
+                        isLoader = true;
+                    } else {
+                        holder = eHolder;
+                    }
+                }
+            } finally {
+                if (stamp != 0) {
+                    lock.unlock(stamp);
+                }
             }
+        }
 
-            if (status == 1) {
-               int sky = 15;
-               int block = 0;
-               Arrays.fill(section.data, Mapper.composeMappingId((byte)(sky | block << 4), 0, 0));
+        if (!isLoader) {
+            VolatileHolder.PRE_ACQUIRE_COUNT.getAndAdd(holder, 1);
+            boolean interrupted = false;
+            try {
+                // 等待发布结果，不占用 CPU；失败也必须唤醒所有等待者。
+                synchronized (holder) {
+                    while (holder.obj == null && holder.failure == null) {
+                        try {
+                            holder.wait();
+                        } catch (InterruptedException ignored) {
+                            interrupted = true;
+                        }
+                    }
+                }
+            } finally {
+                if (interrupted) Thread.currentThread().interrupt();
             }
+            if (holder.failure != null) {
+                if (holder.failure instanceof Error error) throw error;
+                throw (RuntimeException) holder.failure;
+            }
+            section = holder.obj;
+            if ((int) VolatileHolder.POST_ACQUIRE_COUNT.getAndAdd(holder, -1) > 0) {
+                return section;
+            }
+            // 迟到等待者须核对 holder 身份，避免拿到下一轮尚未发布的 LRU 复用对象。
+            long stamp = lock.readLock();
+            try {
+                if (cache.get(key) == holder && section.tryAcquire()) return section;
+            } finally {
+                lock.unlockRead(stamp);
+            }
+            return this.acquire(key, nullOnEmpty);
+        }
 
-            section.acquire(1);
-         }
+        this.loadedSections.incrementAndGet();
+        try {
+            WorldSection removal = null;
+            long lruStamp = this.lruLock.writeLock();
+            try {
+                section = this.lruSecondaryCache.remove(key);
+                if (section == null && !this.lruSecondaryCache.isEmpty()
+                        && this.lruSize + 100 < this.lruSecondaryCache.size() + this.getLoadedCacheCount()) {
+                    removal = this.lruSecondaryCache.removeFirst();
+                }
+            } finally {
+                this.lruLock.unlockWrite(lruStamp);
+            }
+            if (removal != null) removal._releaseArray();
 
-         int preAcquireCount = (int)ActiveSectionTracker.VolatileHolder.PRE_ACQUIRE_COUNT.getAndSet((ActiveSectionTracker.VolatileHolder)holder, (int)0);
-         section.acquire(preAcquireCount);
-         ActiveSectionTracker.VolatileHolder.POST_ACQUIRE_COUNT.set((ActiveSectionTracker.VolatileHolder)holder, (int)preAcquireCount);
-         VarHandle.storeStoreFence();
-         holder.obj = section;
-         VarHandle.releaseFence();
-         if (nullOnEmpty && status == 1) {
-            section.release();
-            return null;
-         } else {
+            int status = 0;
+            if (section != null) {
+                section.primeForReuse();
+            } else {
+                section = new WorldSection(WorldEngine.getLevel(key), WorldEngine.getX(key),
+                        WorldEngine.getY(key), WorldEngine.getZ(key), this);
+                status = this.loader.load(section);
+                if (status < 0) {
+                    Logger.error("Unable to load section " + section.key + " setting to air");
+                    status = 1;
+                }
+                if (status == 1) {
+                    Arrays.fill(section.data, Mapper.composeMappingId((byte) 15, 0, 0));
+                }
+                section.acquire(1);
+            }
+            int preAcquireCount = (int) VolatileHolder.PRE_ACQUIRE_COUNT.getAndSet(holder, 0);
+            section.acquire(preAcquireCount);
+            VolatileHolder.POST_ACQUIRE_COUNT.set(holder, preAcquireCount);
+            synchronized (holder) {
+                holder.obj = section;
+                holder.notifyAll();
+            }
+            if (nullOnEmpty && status == 1) {
+                section.release();
+                return null;
+            }
             return section;
-         }
-      } else {
-         VarHandle.fullFence();
-
-         while ((section = holder.obj) == null) {
-            VarHandle.fullFence();
-            Thread.onSpinWait();
-            Thread.yield();
-         }
-
-         if (0 < (int)ActiveSectionTracker.VolatileHolder.POST_ACQUIRE_COUNT.getAndAdd((ActiveSectionTracker.VolatileHolder)holder, (int)-1)) {
-            return section;
-         } else {
-            return section.tryAcquire() ? section : this.acquire(key, nullOnEmpty);
-         }
-      }
-   }
+        } catch (RuntimeException | Error failure) {
+            // 仅移除本次未发布的 holder，允许后续调用重新加载。
+            if (holder.obj == null) {
+                long stamp = lock.writeLock();
+                try {
+                    cache.remove(key, holder);
+                    this.loadedSections.decrementAndGet();
+                    synchronized (holder) {
+                        holder.failure = failure;
+                        holder.notifyAll();
+                    }
+                } finally {
+                    lock.unlockWrite(stamp);
+                }
+                if (section != null) section._releaseArray();
+            }
+            throw failure;
+        }
+    }
 
    void tryUnload(WorldSection section, int hints) {
       if (this.engine != null) {
@@ -187,76 +235,94 @@ public final class ActiveSectionTracker {
          WorldSection sec = null;
          StampedLock lock = this.locks[index];
          long stamp = lock.writeLock();
-         if (section.getRefCount() != 0) {
-            lock.unlockWrite(stamp);
-         } else {
-            boolean shouldRetryExit = false;
-            VarHandle.loadLoadFence();
-            if (this.engine != null && section.shouldSave()) {
-               if (!section.tryAcquire()) {
-                  throw new IllegalStateException("Section was dirty but is also unloaded, this is very bad");
+         // 保存、校验或缓存操作抛错时也要释放锁。
+         try {
+            if (section.getRefCount() != 0) {
+               lock.unlockWrite(stamp);
+               stamp = 0;
+            } else {
+               boolean shouldRetryExit = false;
+               VarHandle.loadLoadFence();
+               if (this.engine != null && section.shouldSave()) {
+                  if (!section.tryAcquire()) {
+                     throw new IllegalStateException("Section was dirty but is also unloaded, this is very bad");
+                  }
+
+                  if (!this.engine.saveSection(section, true, true)) {
+                     shouldRetryExit |= true;
+                     section.release(false, hints);
+                  }
                }
 
-               if (!this.engine.saveSection(section, true, true)) {
-                  shouldRetryExit |= true;
-                  section.release(false, hints);
+               if (shouldRetryExit) {
+                  lock.unlockWrite(stamp);
+                  stamp = 0;
+                  this.tryUnload(section, hints);
+               } else {
+                  if (section.getRefCount() == 0 && section.trySetFreed()) {
+                     ActiveSectionTracker.VolatileHolder<WorldSection> cached = (ActiveSectionTracker.VolatileHolder<WorldSection>)cache.remove(section.key);
+                     WorldSection obj = cached.obj;
+                     if (obj == null) {
+                        throw new IllegalStateException(
+                           "This should be impossible: " + WorldEngine.pprintPos(section.key) + " secObj: " + System.identityHashCode(section)
+                        );
+                     }
+
+                     if (obj != section) {
+                        throw new IllegalStateException(
+                           "Removed section not the same as the referenced section in the cache: cached: "
+                              + obj
+                              + " got: "
+                              + section
+                              + " A: "
+                              + (Object)WorldSection.ATOMIC_STATE_HANDLE.get((WorldSection)obj)
+                              + " B: "
+                              + (Object)WorldSection.ATOMIC_STATE_HANDLE.get((WorldSection)section)
+                        );
+                     }
+
+                     sec = section;
+                  }
+
+                  WorldSection aa = null;
+                  if (sec != null && (hints & WorldSection.RELEASE_HINT_DONT_CACHE) != 0) {
+                     lock.unlockWrite(stamp);
+                     stamp = 0;
+                     aa = sec;
+                  } else if (sec != null) {
+                     long stamp2 = this.lruLock.writeLock();
+                     try {
+                        lock.unlockWrite(stamp);
+                        stamp = 0;
+                        WorldSection a = (WorldSection)this.lruSecondaryCache.put(section.key, section);
+                        if (a != null) {
+                           throw new IllegalStateException("duplicate sections in cache is impossible");
+                        }
+
+                        if (this.lruSize < this.lruSecondaryCache.size()) {
+                           aa = (WorldSection)this.lruSecondaryCache.removeFirst();
+                        }
+                     } finally {
+                        this.lruLock.unlockWrite(stamp2);
+                     }
+
+                  } else {
+                     lock.unlockWrite(stamp);
+                     stamp = 0;
+                  }
+
+                  if (aa != null) {
+                     aa._releaseArray();
+                  }
+
+                  if (sec != null) {
+                     this.loadedSections.decrementAndGet();
+                  }
                }
             }
-
-            if (shouldRetryExit) {
+         } finally {
+            if (stamp != 0) {
                lock.unlockWrite(stamp);
-               this.tryUnload(section, hints);
-            } else {
-               if (section.getRefCount() == 0 && section.trySetFreed()) {
-                  ActiveSectionTracker.VolatileHolder<WorldSection> cached = (ActiveSectionTracker.VolatileHolder<WorldSection>)cache.remove(section.key);
-                  WorldSection obj = cached.obj;
-                  if (obj == null) {
-                     throw new IllegalStateException(
-                        "This should be impossible: " + WorldEngine.pprintPos(section.key) + " secObj: " + System.identityHashCode(section)
-                     );
-                  }
-
-                  if (obj != section) {
-                     throw new IllegalStateException(
-                        "Removed section not the same as the referenced section in the cache: cached: "
-                           + obj
-                           + " got: "
-                           + section
-                           + " A: "
-                           + (Object)WorldSection.ATOMIC_STATE_HANDLE.get((WorldSection)obj)
-                           + " B: "
-                           + (Object)WorldSection.ATOMIC_STATE_HANDLE.get((WorldSection)section)
-                     );
-                  }
-
-                  sec = section;
-               }
-
-               WorldSection aa = null;
-               if (sec != null) {
-                  long stamp2 = this.lruLock.writeLock();
-                  lock.unlockWrite(stamp);
-                  WorldSection a = (WorldSection)this.lruSecondaryCache.put(section.key, section);
-                  if (a != null) {
-                     throw new IllegalStateException("duplicate sections in cache is impossible");
-                  }
-
-                  if (this.lruSize < this.lruSecondaryCache.size()) {
-                     aa = (WorldSection)this.lruSecondaryCache.removeFirst();
-                  }
-
-                  this.lruLock.unlockWrite(stamp2);
-               } else {
-                  lock.unlockWrite(stamp);
-               }
-
-               if (aa != null) {
-                  aa._releaseArray();
-               }
-
-               if (sec != null) {
-                  this.loadedSections.decrementAndGet();
-               }
             }
          }
       }
@@ -280,42 +346,6 @@ public final class ActiveSectionTracker {
       return this.lruSecondaryCache.size();
    }
 
-   public static void main(String[] args) throws InterruptedException {
-      ActiveSectionTracker tracker = new ActiveSectionTracker(6, a -> 0, 2048);
-      WorldSection bean = tracker.acquire(0, 0, 0, 9, false);
-      WorldSection bean2 = tracker.acquire(1, 0, 0, 0, false);
-      System.out.println("Target obj:" + System.identityHashCode(bean2));
-      bean2.release();
-      Thread[] ts = new Thread[10];
-
-      for (int i = 0; i < ts.length; i++) {
-         int tid = i;
-         ts[i] = new Thread(() -> {
-            try {
-               for (int j = 0; j < 5000; j++) {
-                  WorldSection section = tracker.acquire(0, 0, 0, 0, false);
-                  section.acquire();
-                  WorldSection section2 = tracker.acquire(1, 0, 0, 0, false);
-                  section.release();
-                  section.release();
-                  section2.release();
-                  section = tracker.acquire(0, 0, 0, 0, false);
-                  section2 = tracker.acquire(1, 0, 0, 0, false);
-                  section2.release();
-                  section.release();
-                  tracker.acquire(1, 0, 0, 0, false).release();
-               }
-            } catch (Exception var5x) {
-               throw new RuntimeException("Thread " + tid, var5x);
-            }
-         });
-         ts[i].start();
-      }
-
-      for (Thread t : ts) {
-         t.join();
-      }
-   }
 
    public interface SectionLoader {
       int load(WorldSection var1);
@@ -327,6 +357,7 @@ public final class ActiveSectionTracker {
       public volatile int preAcquireCount;
       public volatile int postAcquireCount;
       public volatile T obj;
+        public volatile Throwable failure;
 
       static {
          try {

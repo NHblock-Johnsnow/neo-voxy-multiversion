@@ -55,6 +55,8 @@ public abstract class VoxyClient {
 
             me.cortex.voxy.client.compat.LodPipelineHooks.register(
                     me.cortex.voxy.client.core.beacon.DistantBeaconRenderer.INSTANCE);
+            net.minecraftforge.common.MinecraftForge.EVENT_BUS.register(
+                    me.cortex.voxy.client.core.beacon.DistantBeaconRenderer.INSTANCE);
             if (isClassAvailable("com.simibubi.create.Create")) {
                 var createRenderer = me.cortex.voxy.client.compat.create.DistantCreateRenderer.INSTANCE;
                 net.minecraftforge.common.MinecraftForge.EVENT_BUS.register(createRenderer);

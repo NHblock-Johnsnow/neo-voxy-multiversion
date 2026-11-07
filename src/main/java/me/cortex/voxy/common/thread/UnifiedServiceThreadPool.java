@@ -1,11 +1,8 @@
 package me.cortex.voxy.common.thread;
 
-import me.cortex.voxy.common.util.Pair;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 
 public class UnifiedServiceThreadPool {
     public final ServiceManager serviceManager;
@@ -82,42 +79,4 @@ public class UnifiedServiceThreadPool {
     }
 
 
-    public static void main(String[] args) {
-        var ustp = new UnifiedServiceThreadPool();
-
-        AtomicInteger cc = new AtomicInteger();
-        AtomicInteger cnt = new AtomicInteger();
-
-        var s1 = ustp.serviceManager.createService(()->{
-            AtomicBoolean cleaned = new AtomicBoolean();
-            AtomicInteger a = new AtomicInteger();
-            return new Pair<>(()->{
-                if (cleaned.get()) {
-                    System.err.println("TRIED EXECUTING CLEANED CTX");
-                } else {
-                    a.incrementAndGet();
-                    cnt.incrementAndGet();
-                }
-            }, ()->{
-                if (cleaned.getAndSet(true)) {
-                    System.err.println("TRIED DOUBLE CLEANING A VALUE");
-                } else {
-                    System.out.println("Cleaned ref, exec: " + a.get());
-                    cc.incrementAndGet();
-                }
-            });
-        }, 1);
-
-        for (int i = 0; i < 1000; i++) {
-            s1.execute();
-        }
-        ustp.setNumThreads(1);
-        ustp.setNumThreads(10);
-        ustp.setNumThreads(0);
-        ustp.setNumThreads(1);
-        s1.blockTillEmpty();
-        s1.shutdown();
-        ustp.shutdown();
-        System.out.println(cnt);
-    }
 }

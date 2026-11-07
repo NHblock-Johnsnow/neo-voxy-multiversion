@@ -33,7 +33,8 @@ public final class FrameProfiler {
     private static volatile long frameStartNanos;
     private static volatile Thread renderThread;
     private static volatile boolean stallCapturedThisFrame;
-    private static Thread watchdog;
+    private static volatile Thread watchdog;
+    private static GPUTiming.Capture gpuCapture;
 
     private static long startedAtMs;
     private static long endAtMs;
@@ -60,10 +61,8 @@ public final class FrameProfiler {
         endAtMs = startedAtMs + seconds * 1000L;
         lastSnapshotMs = 0;
         lastFrameNanos = 0;
-        //GPU timestamps are off by default; turn them on for the capture so the snapshots can separate
-        //"the GPU is busy" from "the render thread is busy". Left on afterwards would keep costing
-        //queries every frame, so stop() turns it back off.
-        GPUTiming.INSTANCE.setEnabled(true);
+        // 仅释放本次采集的计时请求，不覆盖其他分析器或手动开启的状态。
+        gpuCapture = GPUTiming.INSTANCE.capture();
         active = true;
         frameStartNanos = 0;
         watchdog = new Thread(FrameProfiler::runWatchdog, "Voxy frame capture watchdog");
@@ -89,23 +88,30 @@ public final class FrameProfiler {
     //Samples the render thread while a frame is overrunning. getStackTrace on another thread is a
     //safepoint operation, so this runs once per frame and only past the threshold.
     private static void runWatchdog() {
-        while (active) {
+        while (active && Thread.currentThread() == watchdog) {
             try {
                 Thread.sleep(4);
             } catch (InterruptedException e) {
                 return;
             }
-            long start = frameStartNanos;
-            Thread thread = renderThread;
-            if (start == 0 || thread == null || stallCapturedThisFrame) {
-                continue;
-            }
-            //The render thread is gone (renderer shut down, world left): onFrameEnd will never run
-            //again, so end the capture here rather than leaving it armed and unrecoverable
-            if (!thread.isAlive()) {
-                Logger.info(stopAndDump());
+            // 没有新帧时也必须到期；文件与采样集合由同一锁保护。
+            if (System.currentTimeMillis() >= endAtMs) {
+                synchronized (FrameProfiler.class) {
+                    if (Thread.currentThread() == watchdog) Logger.info(stopAndDump());
+                }
                 return;
             }
+            long start = frameStartNanos;
+            Thread thread = renderThread;
+            //The render thread is gone (renderer shut down, world left): onFrameEnd will never run
+            //again, so end the capture here rather than leaving it armed and unrecoverable
+            if (thread != null && !thread.isAlive()) {
+                synchronized (FrameProfiler.class) {
+                    if (Thread.currentThread() == watchdog) Logger.info(stopAndDump());
+                }
+                return;
+            }
+            if (start == 0 || thread == null || stallCapturedThisFrame) continue;
             long elapsedMicros = (System.nanoTime() - start) / 1000;
             if (elapsedMicros > 10_000_000) {
                 continue;
@@ -113,7 +119,11 @@ public final class FrameProfiler {
             if (elapsedMicros < STALL_THRESHOLD_MICROS) {
                 continue;
             }
-            stallCapturedThisFrame = true;
+            synchronized (FrameProfiler.class) {
+                if (!active || Thread.currentThread() != watchdog) return;
+                if (start != frameStartNanos || thread != renderThread || stallCapturedThisFrame) continue;
+                stallCapturedThisFrame = true;
+            }
             StackTraceElement[] trace;
             try {
                 trace = thread.getStackTrace();
@@ -129,7 +139,7 @@ public final class FrameProfiler {
                 sb.append("      ").append(trace[i]).append('\n');
             }
             synchronized (FrameProfiler.class) {
-                if (active && stalls.size() < MAX_STALL_CAPTURES) {
+                if (active && Thread.currentThread() == watchdog && stalls.size() < MAX_STALL_CAPTURES) {
                     stalls.add(sb.toString());
                 }
             }
@@ -138,14 +148,15 @@ public final class FrameProfiler {
 
     //Called at the end of each voxy render. Must stay cheap: it runs inside the frames being measured.
     public static void onFrameEnd() {
-        if (!active) {
-            return;
-        }
+        if (active) recordFrameEnd();
+    }
+
+    private static synchronized void recordFrameEnd() {
+        if (!active) return;
         long nowNanos = System.nanoTime();
         long frameMicros = lastFrameNanos == 0 ? 0 : (nowNanos - lastFrameNanos) / 1000;
         lastFrameNanos = nowNanos;
         if (frameMicros > 0) {
-            TimingStatistics.update();
             frames.add(new long[]{
                     frameMicros,
                     micros(TimingStatistics.all),
@@ -191,7 +202,7 @@ public final class FrameProfiler {
     }
 
     private static long micros(TimingStatistics.TimeSampler sampler) {
-        return (long) (sampler.getRolling() * 1000.0);
+        return sampler.getRuntimeNanos() / 1000;
     }
 
     //Voxy's own threads plus the render thread. Anything blocking the render thread on a GL fence
@@ -261,7 +272,10 @@ public final class FrameProfiler {
             watchdog.interrupt();
             watchdog = null;
         }
-        GPUTiming.INSTANCE.setEnabled(false);
+        if (gpuCapture != null) {
+            gpuCapture.close();
+            gpuCapture = null;
+        }
         if (frames.isEmpty()) {
             return "Frame capture produced no frames";
         }

@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core;
 
+import me.cortex.voxy.common.util.ExceptionCleanup;
+
 import com.mojang.blaze3d.systems.RenderSystem;
 import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.gl.GlFramebuffer;
@@ -43,7 +45,7 @@ import static org.lwjgl.opengl.GL42C.glMemoryBarrier;
 public class NormalRenderPipeline extends AbstractRenderPipeline {
     private GlTexture colourTex;
     private GlTexture colourSSAOTex;
-    private final GlFramebuffer fbSSAO = new GlFramebuffer();
+    private final GlFramebuffer fbSSAO;
 
     private final FullscreenBlit finalBlit;
 
@@ -52,9 +54,15 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
 
     protected NormalRenderPipeline(RenderProperties properties, AsyncNodeManager nodeManager, NodeCleaner nodeCleaner, HierarchicalOcclusionTraverser traversal, BooleanSupplier frexSupplier) {
         super(properties, nodeManager, nodeCleaner, traversal, frexSupplier, false);
-        this.finalBlit = new FullscreenBlit(properties, "voxy:post/blit_texture_depth_cutout.frag",
-                builder -> builder.define("USE_ENV_FOG").define("EMIT_COLOUR"));
-        this.ssao = SSAO.createSSAO(properties, VoxyConfig.CONFIG.getSSAOMode());
+        try {
+            this.fbSSAO = new GlFramebuffer();
+            this.finalBlit = new FullscreenBlit(properties, "voxy:post/blit_texture_depth_cutout.frag",
+                    builder -> builder.define("USE_ENV_FOG").define("EMIT_COLOUR"));
+            this.ssao = SSAO.createSSAO(properties, VoxyConfig.CONFIG.getSSAOMode());
+        } catch (RuntimeException | Error failure) {
+            this.releaseResources(new ExceptionCleanup(failure));
+            throw failure;
+        }
     }
 
     @Override
@@ -174,14 +182,19 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
 
     @Override
     public void free() {
-        this.finalBlit.delete();
-        this.ssao.free();
-        this.fbSSAO.free();
-        if (this.colourTex != null) {
-            this.colourTex.free();
-            this.colourSSAOTex.free();
-        }
-        super.free0();
+        this.assertNotFreed();
+        var cleanup = new ExceptionCleanup(null);
+        this.releaseResources(cleanup);
+        cleanup.rethrow();
+    }
+
+    private void releaseResources(ExceptionCleanup cleanup) {
+        if (this.ssao != null) cleanup.run(this.ssao::free);
+        if (this.finalBlit != null) cleanup.run(this.finalBlit::delete);
+        if (this.colourTex != null) cleanup.run(this.colourTex::free);
+        if (this.colourSSAOTex != null) cleanup.run(this.colourSSAOTex::free);
+        if (this.fbSSAO != null) cleanup.run(this.fbSSAO::free);
+        cleanup.run(super::free0);
     }
 
     @Override

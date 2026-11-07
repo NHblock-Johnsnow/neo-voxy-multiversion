@@ -9,6 +9,7 @@ import me.cortex.voxy.common.util.MemoryBuffer;
 import me.cortex.voxy.common.util.UnsafeUtil;
 import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.common.world.WorldSection;
+import me.cortex.voxy.common.world.SurfaceWorldView;
 import me.cortex.voxy.common.world.other.Mapper;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import org.lwjgl.system.MemoryUtil;
@@ -32,6 +33,8 @@ public class RenderDataFactory {
    private final short[] biomeIds = new short[32768];
    private final MemoryBuffer quadBuffer = new MemoryBuffer(4194304L);
    private final long quadBufferPtr = this.quadBuffer.address;
+   private static final int MAX_BUCKET_QUADS = (1 << 16) - 1;
+   private int droppedQuads;
    private final int[] quadCounters = new int[8];
    private int minX;
    private int minY;
@@ -87,16 +90,13 @@ public class RenderDataFactory {
     }
 
     private long horizontalNeighborRaw(int x, int y, int z) {
-        if (x == -1 && z >= 0 && z < 32) return this.neighboringFaces[z + y * 32];
-        if (x == 32 && z >= 0 && z < 32) return this.neighboringFaces[32 * 32 + z + y * 32];
-        if (z == -1 && x >= 0 && x < 32) return this.neighboringFaces[4 * 32 * 32 + x + y * 32];
-        if (z == 32 && x >= 0 && x < 32) return this.neighboringFaces[5 * 32 * 32 + x + y * 32];
-        return 0;
+        if (this.horizontalHalo == null || y < 0 || y > 32) return 0;
+        return this.horizontalHalo[haloIndex(x, y, z)];
     }
 
     private int effectiveRawFluidHeight(long raw, int x, int y, int z, int kind) {
         int height = rawFluidHeight(raw);
-        if (kind == 0 || y == 31) return height;
+        if (kind == 0) return height;
         return rawFluidKind(horizontalNeighborRaw(x, y + 1, z)) == kind ? 9 : height;
     }
 
@@ -176,14 +176,18 @@ public class RenderDataFactory {
         if (lowerHeight <= 0) return quad;
         quad &= ~((0xFL << 42) | (0x1FFL << 46) | (1L << 63));
         quad |= ((long) lowerHeight) << 42;
-        quad |= ((long) this.biomeIds[voxelIndex] & 0x1FFL) << 46;
+        int paletteIndex = this.fluidBlendIds[voxelIndex];
+        quad |= paletteIndex >= 0 ? (1L << 63) | ((long) paletteIndex << 46)
+                : ((long) this.biomeIds[voxelIndex] & 0x1FFL) << 46;
         return quad;
     }
 
     private long encodeFluidShape(long quad, int payload, int voxelIndex) {
         quad &= ~((0xFL << 42) | (0x1FFL << 46) | (1L << 63));
         quad |= ((long) ((payload >>> 8) & 0xF)) << 42;
-        quad |= ((long) this.biomeIds[voxelIndex] & 0x1FFL) << 46;
+        int paletteIndex = this.fluidBlendIds[voxelIndex];
+        quad |= paletteIndex >= 0 ? (1L << 63) | ((long) paletteIndex << 46)
+                : ((long) this.biomeIds[voxelIndex] & 0x1FFL) << 46;
         return quad;
     }
 
@@ -239,54 +243,157 @@ public class RenderDataFactory {
 
    private final int[] blendBiomeScratch = new int[225];
 
-   private void applyBiomeBlend(long[] raw, int neighborMask) {
-      int radius = Math.min(me.cortex.voxy.client.config.VoxyConfig.CONFIG.biomeBlendRadius, 7);
-      if (radius <= 0) return;
-      boolean waterOnly = !"water_grass".equals(me.cortex.voxy.client.config.VoxyConfig.CONFIG.biomeBlendScope);
-      if (waterOnly) {
-         boolean found = false;
-         for (int mask : this.fluidMasks) if (mask != 0) { found = true; break; }
-         if (!found) return;
-      }
-      var palette = this.modelMan.blendPalette();
-      var colours = palette.snapshot();
-      if (colours.rowBaseByModelId().length == 0) return;
-      int samples = (radius * 2 + 1) * (radius * 2 + 1);
-      for (int i = 0; i < 32768; i++) {
-         long metadata = this.sectionData[i * 2 + 1];
-         if (metadata == 0 || !ModelQueries.isBiomeColoured(metadata)) continue;
-         if (!ModelQueries.isFluid(metadata) && (waterOnly || ModelQueries.containsFluid(metadata))) continue;
-         int x = i & 31, z = i >> 5 & 31, y = i >> 10;
-         int center = (int)(raw[i] >>> 47 & 511L), cursor = 0;
-         boolean mixed = false;
-         for (int dz = -radius; dz <= radius; dz++) for (int dx = -radius; dx <= radius; dx++) {
-            int nx = x + dx, nz = z + dz, biome = center;
-            long sample = 0L;
-            if (nx >= 0 && nx < 32 && nz >= 0 && nz < 32) sample = raw[nx | nz << 5 | y << 10];
-            else if (nx == -1 && nz >= 0 && nz < 32 && (neighborMask & 1) != 0) sample = this.neighboringFaces[nz | y << 5];
-            else if (nx == 32 && nz >= 0 && nz < 32 && (neighborMask & 2) != 0) sample = this.neighboringFaces[(nz | y << 5) + 1024];
-            else if (nz == -1 && nx >= 0 && nx < 32 && (neighborMask & 16) != 0) sample = this.neighboringFaces[(nx | y << 5) + 4096];
-            else if (nz == 32 && nx >= 0 && nx < 32 && (neighborMask & 32) != 0) sample = this.neighboringFaces[(nx | y << 5) + 5120];
-            if (sample != 0 && !Mapper.isAir(sample)) biome = (int)(sample >>> 47 & 511L);
-            this.blendBiomeScratch[cursor++] = biome;
-            mixed |= biome != center;
-         }
-         if (!mixed) continue;
-         int modelId = (int)(this.sectionData[i * 2] >>> 26 & 65535L);
-         int r = 0, g = 0, b = 0; boolean missing = false;
-         for (int j = 0; j < samples; j++) {
-            int colour = colours.colourOf(modelId, this.blendBiomeScratch[j]);
-            if (colour == -1) { missing = true; break; }
-            r += colour & 255; g += colour >>> 8 & 255; b += colour >>> 16 & 255;
-         }
-         if (missing) continue;
-         int index = palette.indexFor(r / samples | g / samples << 8 | b / samples << 16);
-         if (index < 0) continue;
-         long quad = this.sectionData[i * 2] & ~((511L << 46) | (15L << 42));
-         quad |= (long)(index & 511) << 46 | (long)(index >>> 9 & 15) << 42;
-         this.sectionData[i * 2] = quad | Long.MIN_VALUE;
-      }
-   }
+   private static final int HALO_RADIUS = 7;
+    private static final int HALO_STRIDE = 32 + 2 * HALO_RADIUS;
+    private static final int HALO_LAYER = HALO_STRIDE * HALO_STRIDE;
+    private long[] horizontalHalo;
+    private final SurfaceWorldView surfaceView = new SurfaceWorldView();
+    private final short[] fluidBlendIds = new short[32768];
+    private final int[] blendHeads = new int[65536];
+    private final int[] blendNext = new int[1024];
+    private final int[] blendModels = new int[1024];
+    private final int[][] blendPrefix = new int[5][47 * 47];
+
+    private static int haloIndex(int x, int y, int z) {
+        return (x + HALO_RADIUS) + (z + HALO_RADIUS) * HALO_STRIDE + y * HALO_LAYER;
+    }
+
+    private long sampleHorizontal(long[] raw, int x, int y, int z) {
+        if (y < 32 && x >= 0 && x < 32 && z >= 0 && z < 32) return raw[x | (z << 5) | (y << 10)];
+        return this.horizontalHalo[haloIndex(x, y, z)];
+    }
+
+    /** 每个邻区只获取一次，只复制半径内的边带；不在逐体素采样中访问存储。 */
+    private void prepareHorizontalHalo(WorldSection section, boolean fluid, int radius) {
+        if (this.horizontalHalo == null) this.horizontalHalo = new long[HALO_LAYER * 33];
+        for (int dy = 0; dy <= (fluid ? 1 : 0); dy++) {
+            int r = dy == 0 ? radius : 1;
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    if (dy == 0 && dx == 0 && dz == 0) continue;
+                    int minX = dx < 0 ? -r : dx > 0 ? 32 : 0;
+                    int maxX = dx < 0 ? 0 : dx > 0 ? 32 + r : 32;
+                    int minZ = dz < 0 ? -r : dz > 0 ? 32 : 0;
+                    int maxZ = dz < 0 ? 0 : dz > 0 ? 32 + r : 32;
+                    for (int y = 0; y < (dy == 0 ? 32 : 1); y++) {
+                        for (int z = minZ; z < maxZ; z++) {
+                            int destination = haloIndex(minX, dy * 32 + y, z);
+                            this.surfaceView.copyRow(minX, dy * 32 + y, z,
+                                    this.horizontalHalo, destination, maxX - minX);
+                        }
+                    }
+
+                }
+            }
+        }
+    }
+
+    private int blendModel(int index, boolean waterOnly) {
+        long meta = this.sectionData[index * 2 + 1];
+        if (ModelQueries.containsFluid(meta)) {
+            int model = fluidModelId(index);
+            return ModelQueries.isBiomeColoured(this.modelMan.getModelMetadataFromClientId(model)) ? model : -1;
+        }
+        if (meta == 0 || !ModelQueries.isBiomeColoured(meta) || (waterOnly && !ModelQueries.isFluid(meta))) return -1;
+        return (int) ((this.sectionData[index * 2] >>> 26) & 0xFFFF);
+    }
+
+    private void buildBlendPrefix(long[] raw, me.cortex.voxy.client.core.model.BiomeBlendPalette.Snapshot colours,
+                                  int model, int y, int radius) {
+        int width = 32 + 2 * radius;
+        int stride = width + 1;
+        for (var prefix : this.blendPrefix) Arrays.fill(prefix, 0, stride, 0);
+        for (int z = 0; z < width; z++) {
+            for (var prefix : this.blendPrefix) prefix[(z + 1) * stride] = 0;
+            for (int x = 0; x < width; x++) {
+                long sample = sampleHorizontal(raw, x - radius, y, z - radius);
+                boolean missing = Mapper.isAir(sample);
+                int colour = missing ? 0 : colours.colourOf(model, Mapper.getBiomeId(sample));
+                int at = (z + 1) * stride + x + 1;
+                for (int c = 0; c < 5; c++) {
+                    int value = c < 3 ? (colour >>> (c * 8)) & 255 : c == 3 ? (missing ? 1 : 0) : (!missing && colour == -1 ? 1 : 0);
+                    // 缺失点按中心群系回退；不可用颜色则使整个窗口暂缓。
+                    if (c < 3 && (missing || colour == -1)) value = 0;
+                    int[] prefix = this.blendPrefix[c];
+                    prefix[at] = value + prefix[at - 1] + prefix[at - stride] - prefix[at - stride - 1];
+                }
+            }
+        }
+    }
+
+    private int blendSum(int channel, int x, int z, int window, int stride) {
+        int[] p = this.blendPrefix[channel];
+        int a = z * stride + x, b = a + window, c = a + window * stride, d = c + window;
+        return p[d] - p[b] - p[c] + p[a];
+    }
+
+    private void applyBiomeBlend(long[] raw) {
+        Arrays.fill(this.fluidBlendIds, (short) -1);
+        int radius = Math.min(7, Math.max(0, me.cortex.voxy.client.config.VoxyConfig.CONFIG.biomeBlendRadius));
+        if (radius == 0) return;
+        var palette = this.modelMan.blendPalette();
+        var colours = palette.snapshot();
+        if (colours.rowBaseByModelId().length == 0) return;
+        boolean waterOnly = !"water_grass".equals(me.cortex.voxy.client.config.VoxyConfig.CONFIG.biomeBlendScope);
+        int window = radius * 2 + 1, samples = window * window, width = 32 + 2 * radius;
+        for (int y = 0; y < 32; y++) {
+            int modelCount = 0;
+            try {
+                for (int local = 0; local < 1024; local++) {
+                    int model = blendModel((y << 10) | local, waterOnly);
+                    if (model < 0) continue;
+                    if (this.blendHeads[model] == 0) this.blendModels[modelCount++] = model;
+                    this.blendNext[local] = this.blendHeads[model];
+                    this.blendHeads[model] = local + 1;
+                }
+                for (int m = 0; m < modelCount; m++) {
+                    int model = this.blendModels[m], count = 0;
+                    for (int n = this.blendHeads[model]; n != 0; n = this.blendNext[n - 1]) count++;
+                    // 密集同材质平面只算一次二维前缀和；稀疏模型保留小窗口直采。
+                    boolean prefix = count * samples > width * width;
+                    if (prefix) buildBlendPrefix(raw, colours, model, y, radius);
+                    for (int n = this.blendHeads[model]; n != 0; n = this.blendNext[n - 1]) {
+                        int local = n - 1, index = (y << 10) | local, x = local & 31, z = local >>> 5;
+                        int center = colours.colourOf(model, Mapper.getBiomeId(raw[index]));
+                        if (center == -1) continue;
+                        int red = 0, green = 0, blue = 0;
+                        if (prefix) {
+                            if (blendSum(4, x, z, window, width + 1) != 0) continue;
+                            int missing = blendSum(3, x, z, window, width + 1);
+                            red = blendSum(0, x, z, window, width + 1) + missing * (center & 255);
+                            green = blendSum(1, x, z, window, width + 1) + missing * ((center >>> 8) & 255);
+                            blue = blendSum(2, x, z, window, width + 1) + missing * ((center >>> 16) & 255);
+                        } else {
+                            boolean unavailable = false;
+                            for (int dz = -radius; dz <= radius && !unavailable; dz++) {
+                                for (int dx = -radius; dx <= radius; dx++) {
+                                    long sample = sampleHorizontal(raw, x + dx, y, z + dz);
+                                    int colour = Mapper.isAir(sample) ? center : colours.colourOf(model, Mapper.getBiomeId(sample));
+                                    if (colour == -1) { unavailable = true; break; }
+                                    red += colour & 255; green += (colour >>> 8) & 255; blue += (colour >>> 16) & 255;
+                                }
+                            }
+                            if (unavailable) continue;
+                        }
+                        int blended = (red / samples) | ((green / samples) << 8) | ((blue / samples) << 16);
+                        if (blended == (center & 0xFFFFFF)) continue;
+                        boolean fluid = hasFluid(index);
+                        int paletteIndex = fluid ? palette.indexForFluid(blended) : palette.indexFor(blended);
+                        if (paletteIndex < 0) continue;
+                        if (fluid) this.fluidBlendIds[index] = (short) paletteIndex;
+                        // 含水方块的本体保留自身颜色，覆盖层单独读取 fluidBlendIds。
+                        if (ModelQueries.containsFluid(this.sectionData[index * 2 + 1])) continue;
+                        long quad = this.sectionData[index * 2] & ~((0x1FFL << 46) | (0xFL << 42));
+                        quad |= ((long) (paletteIndex & 0x1FF)) << 46;
+                        if (!fluid) quad |= ((long) (paletteIndex >>> 9)) << 42;
+                        this.sectionData[index * 2] = quad | (1L << 63);
+                    }
+                }
+            } finally {
+                for (int m = 0; m < modelCount; m++) this.blendHeads[this.blendModels[m]] = 0;
+            }
+        }
+    }
 
    private int prepareSectionData(long[] rawSectionData) {
       long[] sectionData = this.sectionData;
@@ -361,72 +468,16 @@ public class RenderDataFactory {
    }
 
    private void acquireNeighborData(WorldSection section, int msk) {
-      if ((msk & 1) != 0) {
-         WorldSection sec = this.world.acquire(section.lvl, section.x - 1, section.y, section.z);
-         long[] raw = sec._unsafeGetRawDataArray();
+        int unavailable = 0;
+        for (int face = 0; face < 6; face++) {
+            if ((msk & (1 << face)) == 0) continue;
+            long missing = 0L;
+            if (!this.surfaceView.copyFace(face, this.neighboringFaces, face * 1024, missing)) {
+                unavailable |= 1 << face;
+            }
+        }
 
-         for (int i = 0; i < 1024; i++) {
-            this.neighboringFaces[i] = raw[(i << 5) + 31];
-         }
-
-         sec.release(WorldSection.RELEASE_HINT_POSSIBLE_REUSE);
-      }
-
-      if ((msk & 2) != 0) {
-         WorldSection sec = this.world.acquire(section.lvl, section.x + 1, section.y, section.z);
-         long[] raw = sec._unsafeGetRawDataArray();
-
-         for (int i = 0; i < 1024; i++) {
-            this.neighboringFaces[i + 1024] = raw[i << 5];
-         }
-
-         sec.release(WorldSection.RELEASE_HINT_POSSIBLE_REUSE);
-      }
-
-      if ((msk & 4) != 0) {
-         WorldSection sec = this.world.acquire(section.lvl, section.x, section.y - 1, section.z);
-         long[] raw = sec._unsafeGetRawDataArray();
-
-         for (int i = 0; i < 1024; i++) {
-            this.neighboringFaces[i + 2048] = raw[i | 31744];
-         }
-
-         sec.release(WorldSection.RELEASE_HINT_POSSIBLE_REUSE);
-      }
-
-      if ((msk & 8) != 0) {
-         WorldSection sec = this.world.acquire(section.lvl, section.x, section.y + 1, section.z);
-         long[] raw = sec._unsafeGetRawDataArray();
-
-         for (int i = 0; i < 1024; i++) {
-            this.neighboringFaces[i + 3072] = raw[i];
-         }
-
-         sec.release(WorldSection.RELEASE_HINT_POSSIBLE_REUSE);
-      }
-
-      if ((msk & 16) != 0) {
-         WorldSection sec = this.world.acquire(section.lvl, section.x, section.y, section.z - 1);
-         long[] raw = sec._unsafeGetRawDataArray();
-
-         for (int i = 0; i < 1024; i++) {
-            this.neighboringFaces[i + 4096] = raw[Integer.expand(i, 31775) | 992];
-         }
-
-         sec.release(WorldSection.RELEASE_HINT_POSSIBLE_REUSE);
-      }
-
-      if ((msk & 32) != 0) {
-         WorldSection sec = this.world.acquire(section.lvl, section.x, section.y, section.z + 1);
-         long[] raw = sec._unsafeGetRawDataArray();
-
-         for (int i = 0; i < 1024; i++) {
-            this.neighboringFaces[i + 5120] = raw[Integer.expand(i, 31775)];
-         }
-
-         sec.release(WorldSection.RELEASE_HINT_POSSIBLE_REUSE);
-      }
-   }
+    }
 
    private static boolean shouldMeshNonOpaqueBlockFace(int face, long quad, long meta, long neighborQuad, long neighborMeta) {
       if (((quad ^ neighborQuad) & 4397979402240L) == 0L && ModelQueries.cullsSame(meta)) {
@@ -1802,7 +1853,14 @@ public class RenderDataFactory {
 
    /** 将区段快照转换为该版本渲染器使用的固定网格布局。 */
    public BuiltSection generateMesh(WorldSection section) {
+        try (var view = this.surfaceView.open(this.world, section)) {
+            return this.generateMeshWithView(section);
+        }
+    }
+
+    private BuiltSection generateMeshWithView(WorldSection section) {
       this.quadCount = 0;
+      this.droppedQuads = 0;
       this.blockMesher.reset();
       this.blockMesher.doAuxiliaryFaceOffset = true;
       this.secondaryBlockMesher.reset();
@@ -1832,7 +1890,8 @@ public class RenderDataFactory {
       Arrays.fill(this.opaqueMasks, 0);
       Arrays.fill(this.nonOpaqueMasks, 0);
       Arrays.fill(this.fluidMasks, 0);
-      int neighborMskAndFlags = this.prepareSectionData(section._unsafeGetRawDataArray());
+      long[] rawSection = this.surfaceView.sectionData();
+        int neighborMskAndFlags = this.prepareSectionData(rawSection);
       if ((neighborMskAndFlags & -2147483648) != 0) {
          throw new IdNotYetComputedException(neighborMskAndFlags & 1048575, true);
       } else {
@@ -1841,7 +1900,19 @@ public class RenderDataFactory {
          this.acquireNeighborData(section, neighborMsk);
 
          try {
-            this.applyBiomeBlend(section._unsafeGetRawDataArray(), neighborMsk);
+            boolean fluidHalo = false;
+            for (int mask : this.fluidMasks) if (mask != 0) { fluidHalo = true; break; }
+            int blendRadius = Math.min(7, Math.max(0, me.cortex.voxy.client.config.VoxyConfig.CONFIG.biomeBlendRadius));
+            if (blendRadius > 0) {
+                boolean waterOnly = !"water_grass".equals(me.cortex.voxy.client.config.VoxyConfig.CONFIG.biomeBlendScope);
+                boolean blend = false;
+                if (this.modelMan.blendPalette().snapshot().rowBaseByModelId().length != 0) {
+                    for (int i = 0; i < 32768; i++) if (blendModel(i, waterOnly) >= 0) { blend = true; break; }
+                }
+                if (!blend) blendRadius = 0;
+            }
+            if (fluidHalo || blendRadius != 0) prepareHorizontalHalo(section, fluidHalo, Math.max(fluidHalo ? 1 : 0, blendRadius));
+            this.applyBiomeBlend(rawSection);
             this.generateYZFaces();
             this.generateXFaces();
             this.generateFluidFaces();
@@ -1853,6 +1924,11 @@ public class RenderDataFactory {
 
          if (this.occupancy != null && section.lvl == 0 && this.quadCount != 0 && (flags & 1) != 0) {
             this.buildOccupancy();
+         }
+
+         if (this.droppedQuads != 0) {
+             Logger.warn("Quad bucket limit for section " + WorldEngine.pprintPos(section.key)
+                     + ": dropped " + this.droppedQuads + " quads");
          }
 
          if (this.quadCount == 0) {
@@ -1981,6 +2057,11 @@ public class RenderDataFactory {
                encodedPosition |= auxPos << shiftAmount;
                long quad = data | Integer.toUnsignedLong(encodedPosition);
                int bufferIdx = type + (type == 2 ? face : 0);
+               if (RenderDataFactory.this.quadCounters[bufferIdx] >= MAX_BUCKET_QUADS) {
+                   RenderDataFactory.this.quadCount--;
+                   RenderDataFactory.this.droppedQuads++;
+                   return;
+               }
                long bufferOffset = RenderDataFactory.this.quadCounters[bufferIdx]++ * 8L + bufferIdx * 8L * 65536L;
                MemoryUtil.memPutLong(RenderDataFactory.this.quadBufferPtr + bufferOffset, quad);
                if (axis == 0) {

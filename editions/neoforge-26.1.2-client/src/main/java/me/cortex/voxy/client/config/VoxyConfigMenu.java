@@ -22,6 +22,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 
+import java.util.Locale;
+
 /** 26.1.2 的 Sodium 配置页，按页面和功能组组织选项。 */
 public class VoxyConfigMenu implements ConfigEntryPoint {
     @Override
@@ -37,6 +39,7 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
         SodiumConfigBuilder.buildToSodium(builder, options, config::save, VoxyConfigMenu::registerPostApplyOps,
                 generalPage(config, renderReload),
                 renderingPage(config, renderReload),
+                experimentalPage(config),
                 requestDistancePage(config));
     }
 
@@ -112,9 +115,9 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
                                 .setPostChangeFlags("voxy:iris_reload")
                                 .setEnabler("voxy:enabled")),
                 qualityGroup(config, renderReload),
-                transitionGroup(config),
+                vanillaEffectsGroup(config, renderReload),
                 fogGroup(config, renderReload),
-                vanillaEffectsGroup(config, renderReload))
+                biomeColoursGroup(config, renderReload))
                 .setEnablerAND("voxy:enabled", "voxy:rendering");
     }
 
@@ -143,13 +146,9 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
                         () -> config.getLeafLodMode().ordinal(),
                         value -> config.setLeafLodMode(VoxyConfig.LeafLodMode.values()[value]), new Range(0, 2, 1))
                         .setFormatter(value -> Component.translatable("voxy.config.general.leafLodMode."
-                                + VoxyConfig.LeafLodMode.values()[value].name().toLowerCase()))
+                                + VoxyConfig.LeafLodMode.values()[value].name().toLowerCase(Locale.ROOT)))
                         .setImpact(OptionImpact.MEDIUM)
                         .setPostChangeFlags(renderReload),
-                new IntOption("voxy:biome_blend_radius", Component.translatable("voxy.config.general.biomeBlendRadius"),
-                        () -> config.biomeBlendRadius, value -> config.biomeBlendRadius = value, new Range(0, 7, 1))
-                        .setPostChangeFlags(renderReload)
-                        .setImpact(OptionImpact.MEDIUM),
                 new IntOption("voxy:earth_curve_ratio", Component.translatable("voxy.config.general.earthCurveRatio"),
                         () -> config.earthCurveRatio, value -> config.earthCurveRatio = value > 0 && value < 50 ? 50 : value,
                         new Range(0, 10000, 50))
@@ -157,58 +156,61 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
                         .setImpact(OptionImpact.LOW));
     }
 
+    private static Page experimentalPage(VoxyConfig config) {
+        return new Page(Component.translatable("voxy.config.experimental"), transitionGroup(config))
+                .setEnablerAND("voxy:enabled", "voxy:rendering");
+    }
+
     private static Group transitionGroup(VoxyConfig config) {
-        return new Group(Component.translatable("voxy.config.group.experimental"),
+        return new Group(Component.translatable("voxy.config.group.experimentalTransition"),
                 new BoolOption("voxy:lod_boundary_fade", Component.translatable("voxy.config.general.lodBoundaryFade"),
                         () -> config.enableLodBoundaryFade, value -> config.enableLodBoundaryFade = value)
                         .setImpact(OptionImpact.LOW),
                 new IntOption("voxy:lod_boundary_fade_length", Component.translatable("voxy.config.general.lodBoundaryFadeLength"),
                         () -> config.lodBoundaryFadeLength, value -> config.lodBoundaryFadeLength = value, new Range(8, 64, 1))
                         .setFormatter(value -> Component.translatable("voxy.config.unit.blocks", value))
-                        .setEnabler("voxy:lod_boundary_fade")
+                        .setEnablerInherit(state -> state.readBooleanOption(Identifier.parse("voxy:lod_boundary_fade")), "voxy:lod_boundary_fade")
                         .setImpact(OptionImpact.LOW),
                 new IntOption("voxy:lod_boundary_inset", Component.translatable("voxy.config.general.lodBoundaryInset"),
                         () -> config.lodBoundaryInset, value -> config.lodBoundaryInset = value, new Range(8, 32, 1))
                         .setFormatter(value -> Component.translatable("voxy.config.unit.blocks", value))
-                        .setEnabler("voxy:lod_boundary_fade")
+                        .setEnablerInherit(state -> state.readBooleanOption(Identifier.parse("voxy:lod_boundary_fade")), "voxy:lod_boundary_fade")
                         .setImpact(OptionImpact.LOW));
     }
 
     private static Group fogGroup(VoxyConfig config, String renderReload) {
         return new Group(Component.translatable("voxy.config.group.fog"),
-                new BoolOption("voxy:environmental_fog", Component.translatable("voxy.config.general.environmental_fog"),
-                        () -> config.useEnvironmentalFog, value -> config.useEnvironmentalFog = value)
-                        .setPostChangeFlags(renderReload),
                 new IntOption("voxy:fog_intensity", Component.translatable("voxy.config.general.fogIntensity"),
                         () -> Math.round(config.fogIntensity * 100.0F), value -> config.fogIntensity = value / 100.0F,
                         new Range(0, 100, 1))
-                        .setFormatter(value -> Component.literal(value + "%"))
-                        .setEnabler("voxy:environmental_fog")
+                        .setEnablerInherit(state -> state.readBooleanOption(Identifier.parse("voxy:environmental_fog")), "voxy:environmental_fog")
                         .setImpact(OptionImpact.LOW),
                 new IntOption("voxy:fog_density", Component.translatable("voxy.config.general.fogDensity"),
                         () -> Math.round(config.fogDensity * 100.0F), value -> config.fogDensity = value / 100.0F,
                         new Range(0, 100, 1))
-                        .setFormatter(value -> Component.literal(value + "%"))
-                        .setEnabler("voxy:environmental_fog")
+                        .setEnablerInherit(state -> state.readBooleanOption(Identifier.parse("voxy:environmental_fog")), "voxy:environmental_fog")
                         .setImpact(OptionImpact.LOW),
                 new IntOption("voxy:sky_fog_distance", Component.translatable("voxy.config.general.skyFogDistance"),
                         () -> config.skyFogDistance, value -> config.skyFogDistance = value, new Range(0, 1024, 1))
-                        .setFormatter(value -> Component.translatable("voxy.config.unit.chunks", value))
-                        .setEnabler("voxy:environmental_fog")
+                        .setPostChangeFlags(renderReload)
+                        .setEnablerInherit(state -> state.readBooleanOption(Identifier.parse("voxy:environmental_fog")), "voxy:environmental_fog")
                         .setImpact(OptionImpact.LOW),
-                new IntOption("voxy:fog_distance_percent", Component.translatable("voxy.config.general.fogDistancePercent"),
+                new IntOption("voxy:fog_distance", Component.translatable("voxy.config.general.fog_distance"),
                         () -> config.fogDistancePercent, value -> config.fogDistancePercent = value, new Range(5, 200, 5))
                         .setFormatter(value -> Component.literal(value + "%"))
-                        .setEnabler("voxy:environmental_fog")
+                        .setEnablerInherit(state -> state.readBooleanOption(Identifier.parse("voxy:environmental_fog")), "voxy:environmental_fog")
                         .setImpact(OptionImpact.LOW))
                 .setEnablerInherit(state -> !IrisUtil.irisShadersEnabledInConfig(), ConfigState.UPDATE_ON_REBUILD);
     }
 
     private static Group vanillaEffectsGroup(VoxyConfig config, String renderReload) {
         return new Group(Component.translatable("voxy.config.group.vanillaEffects"),
+                new BoolOption("voxy:environmental_fog", Component.translatable("voxy.config.general.environmental_fog"),
+                        () -> config.useEnvironmentalFog, value -> config.useEnvironmentalFog = value)
+                        .setPostChangeFlags(renderReload),
                 new EnumOption<>("voxy:ssao_mode", SSAO.SSAOMode.class,
                         Component.translatable("voxy.config.general.ssao_mode"), config::getSSAOMode, config::setSSAOMode)
-                        .setNameProvider(value -> Component.translatable("voxy.config.general.ssao_mode." + value.name().toLowerCase()))
+                        .setNameProvider(value -> Component.translatable("voxy.config.general.ssao_mode." + value.name().toLowerCase(Locale.ROOT)))
                         .setImpact(OptionImpact.MEDIUM)
                         .setPostChangeFlags(renderReload))
                 .setEnablerInherit(state -> !IrisUtil.irisShadersEnabledInConfig(), ConfigState.UPDATE_ON_REBUILD);
@@ -217,15 +219,34 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
     private static Page requestDistancePage(VoxyConfig config) {
         return new Page(Component.translatable("voxy.config.fakesight"),
                 new Group(Component.translatable("voxy.config.group.chunkRequests"),
-                        new BoolOption("voxy:extended_request", Component.translatable("voxy.config.fakesight.enabled"),
+                        new BoolOption("voxy:fakesight_enabled", Component.translatable("voxy.config.fakesight.enabled"),
                                 () -> config.enableExtendedRequestDistance, value -> config.enableExtendedRequestDistance = value)
                                 .setImpact(OptionImpact.HIGH)
                                 .setPostChangeFlags("voxy:refresh_chunk_request"),
-                        new IntOption("voxy:request_distance", Component.translatable("voxy.config.fakesight.distance"),
+                        new IntOption("voxy:fakesight_request_distance", Component.translatable("voxy.config.fakesight.distance"),
                                 config::getRequestDistance, value -> config.requestDistance = value, new Range(8, 48, 1))
                                 .setImpact(OptionImpact.HIGH)
                                 .setPostChangeFlags("voxy:refresh_chunk_request")
-                                .setEnabler("voxy:extended_request")));
+                                .setEnablerInherit(state -> state.readBooleanOption(Identifier.parse("voxy:fakesight_enabled")), "voxy:fakesight_enabled"))
+                        .setEnablerInherit(state -> Minecraft.getInstance().getConnection() == null
+                                || Minecraft.getInstance().hasSingleplayerServer(), ConfigState.UPDATE_ON_REBUILD))
+                .setEnablerAND("voxy:enabled", "voxy:rendering");
+    }
+
+    private static Group biomeColoursGroup(VoxyConfig config, String renderReload) {
+        return new Group(Component.translatable("voxy.config.group.biomeColours"),
+                new IntOption("voxy:biome_blend_radius", Component.translatable("voxy.config.general.biomeBlendRadius"),
+                        () -> config.biomeBlendRadius, value -> config.biomeBlendRadius = value, new Range(0, 7, 1))
+                        .setFormatter(value -> value == 0
+                                ? Component.translatable("voxy.config.general.biomeBlendRadius.off")
+                                : Component.literal(Integer.toString(value)))
+                        .setPostChangeFlags(renderReload)
+                        .setImpact(OptionImpact.MEDIUM),
+                new BoolOption("voxy:biome_blend_grass", Component.translatable("voxy.config.general.biomeBlendGrass"),
+                        () -> "water_grass".equals(config.biomeBlendScope),
+                        value -> config.biomeBlendScope = value ? "water_grass" : "water")
+                        .setPostChangeFlags(renderReload)
+                        .setImpact(OptionImpact.MEDIUM));
     }
 
 }

@@ -3,6 +3,7 @@ package me.cortex.voxy.client.config;
 import com.google.gson.FieldNamingPolicy;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonParseException;
 import me.cortex.voxy.client.core.SSAO;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.cpu.CpuLayout;
@@ -143,8 +144,14 @@ public class VoxyConfig
                     } else {
                         Logger.error("Failed to load voxy config, resetting");
                     }
-                } catch (IOException e) {
+                } catch (IOException | JsonParseException e) {
                     Logger.error("Could not parse config", e);
+                    try {
+                        Files.copy(path, path.resolveSibling(path.getFileName() + ".invalid"),
+                                StandardCopyOption.REPLACE_EXISTING);
+                    } catch (IOException backupFailure) {
+                        Logger.error("Could not back up invalid config", backupFailure);
+                    }
                 }
             }
             Logger.info("Config doesnt exist, creating new");

@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core.model;
 
+import me.cortex.voxy.common.util.ExceptionCleanup;
+
 import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
 import java.util.List;
 import java.util.concurrent.locks.LockSupport;
@@ -19,26 +21,31 @@ public class ModelBakerySubsystem {
    private final IntOpenHashSet seenIds = new IntOpenHashSet(6000);
 
    public ModelBakerySubsystem(Mapper mapper) {
-      this.mapper = mapper;
-      this.factory = new ModelFactory(mapper, this.storage);
-      this.processingThread = new Thread(() -> {
-         while (this.isRunning) {
-            while (this.factory.processAllThings()) {
-            }
+        this.mapper = mapper;
+        try {
+            this.factory = new ModelFactory(mapper, this.storage);
+            this.processingThread = new Thread(() -> {
+               while (this.isRunning) {
+                  while (this.factory.processAllThings()) {
+                  }
 
-            LockSupport.park();
-         }
-      }, "Model factory processor");
-      this.processingThread.setUncaughtExceptionHandler((t, e) -> {
-         this.isRunning = false;
-         if (e == null) {
-            e = new RuntimeException("unhandled excpetion not added");
-         }
+                  LockSupport.park();
+               }
+            }, "Model factory processor");
+            this.processingThread.setUncaughtExceptionHandler((t, e) -> {
+               this.isRunning = false;
+               if (e == null) {
+                  e = new RuntimeException("unhandled excpetion not added");
+               }
 
-         this.processingThreadException = e;
-      });
-      this.processingThread.start();
-   }
+               this.processingThreadException = e;
+            });
+            this.processingThread.start();
+        } catch (RuntimeException | Error failure) {
+            this.releaseResources(new ExceptionCleanup(failure));
+            throw failure;
+        }
+    }
 
    public void tick(long totalBudget) {
       if (this.processingThreadException != null) {
@@ -51,18 +58,31 @@ public class ModelBakerySubsystem {
    public void drainBlendPalette() { this.factory.drainBlendPalette(); }
 
    public void shutdown() {
-      this.isRunning = false;
-      LockSupport.unpark(this.processingThread);
+        var cleanup = new ExceptionCleanup(null);
+        this.releaseResources(cleanup);
+        cleanup.rethrow();
+    }
 
-      try {
-         this.processingThread.join();
-      } catch (InterruptedException var2) {
-         throw new RuntimeException(var2);
-      }
-
-      this.factory.free();
-      this.storage.free();
-   }
+    private void releaseResources(ExceptionCleanup cleanup) {
+        this.isRunning = false;
+        boolean interrupted = Thread.interrupted();
+        try {
+            if (this.processingThread != null) {
+                while (this.processingThread.isAlive()) {
+                    LockSupport.unpark(this.processingThread);
+                    try {
+                        this.processingThread.join();
+                    } catch (InterruptedException failure) {
+                        interrupted = true;
+                    }
+                }
+            }
+            if (this.factory != null) cleanup.run(this.factory::free);
+            cleanup.run(this.storage::free);
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+    }
 
    public void requestBlockBake(int blockId) {
       if (this.mapper.getBlockStateCount() <= blockId) {

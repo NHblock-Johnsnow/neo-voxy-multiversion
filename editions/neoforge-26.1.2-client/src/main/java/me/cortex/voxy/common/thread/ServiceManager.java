@@ -120,9 +120,7 @@ public class ServiceManager {
                }
 
                if (selectedService.isLive() && selectedService.runJob()) {
-                  if (this.totalJobs.decrementAndGet() < 0) {
-                     throw new IllegalStateException("Job count <0");
-                  }
+                  // 任务许可由 Service 在 finally 中结算，包含异常退出。
 
                   return 0;
                }

@@ -209,6 +209,7 @@ public class VoxyConfig {
             var config = new VoxyConfig();
             config.enabled = false;
             config.enableRendering = false;
+            config.syncRuntime();
             return config;
         }
 
@@ -218,6 +219,7 @@ public class VoxyConfig {
                 VoxyConfig config = GSON.fromJson(reader, VoxyConfig.class);
                 if (config != null) {
                     config.sanitize();
+                    config.syncRuntime();
                     return config;
                 }
                 Logger.error("Failed to load Voxy config; resetting it");
@@ -246,6 +248,8 @@ public class VoxyConfig {
         }
         this.fogDistancePercent = Math.clamp(this.fogDistancePercent, 5, 200);
         this.skyFogDistance = Math.clamp(this.skyFogDistance, 0, 1024);
+        this.earthCurveRatio = Math.clamp(this.earthCurveRatio, 0, 5000);
+        if (this.earthCurveRatio > 0 && this.earthCurveRatio < 50) this.earthCurveRatio = 50;
         this.cloudDistance = Math.clamp(this.cloudDistance, 0, MAX_CLOUD_DISTANCE);
         this.fogIntensity = Math.clamp(this.fogIntensity, 0.0f, 1.0f);
         this.fogDensity = Math.clamp(this.fogDensity, 0.0f, 1.0f);
@@ -262,14 +266,15 @@ public class VoxyConfig {
     }
 
     public void save() {
+        this.sanitize();
+        this.syncRuntime();
+        // CONFIG 初始化期间尚未赋值，不能从配置桥反向读取它。
+        if (this == CONFIG) VoxyNeoForgeConfig.syncFromVoxyConfig();
         if (!VoxyCommon.isAvailable()) {
             Logger.info("Not saving config since voxy is unavailable");
-            this.syncSableContraptionRenderDistance();
-            this.syncDistantTrainConfig();
             return;
         }
 
-        this.sanitize();
         Path path = getConfigPath();
         Path temporary = path.resolveSibling(path.getFileName() + ".tmp");
 
@@ -288,7 +293,9 @@ public class VoxyConfig {
             } catch (IOException ignored) {
             }
         }
+    }
 
+    private void syncRuntime() {
         this.syncSableContraptionRenderDistance();
         this.syncDistantTrainConfig();
     }

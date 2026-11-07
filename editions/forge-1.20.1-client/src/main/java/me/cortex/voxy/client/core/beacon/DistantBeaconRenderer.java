@@ -9,7 +9,6 @@ import me.cortex.voxy.client.core.AbstractRenderPipeline;
 import me.cortex.voxy.client.core.rendering.Viewport;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.blockentity.BeaconRenderer;
-import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BeaconBlockEntity;
 import org.joml.Matrix4f;
@@ -25,7 +24,7 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
     public static final DistantBeaconRenderer INSTANCE = new DistantBeaconRenderer();
     private static final float RADIUS = 0.12f;
     private final Long2ObjectOpenHashMap<Beam> beams = new Long2ObjectOpenHashMap<>();
-    private ResourceKey<Level> dimension;
+    private Level level;
 
     private record Segment(int bottom, int top, int rgb) {}
     private record Beam(int x, int y, int z, int signature, DistantMesh mesh) {}
@@ -33,12 +32,18 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
 
     public static void observe(BeaconBlockEntity beacon) { INSTANCE.observe0(beacon); }
 
+    @net.minecraftforge.eventbus.api.SubscribeEvent
+    public void onLogout(net.minecraftforge.client.event.ClientPlayerNetworkEvent.LoggingOut event) {
+        this.clear();
+        this.level = null;
+    }
+
     private void observe0(BeaconBlockEntity beacon) {
         if (beacon.getLevel() == null) return;
-        ResourceKey<Level> current = beacon.getLevel().dimension();
-        if (!current.equals(this.dimension)) {
+        Level current = beacon.getLevel();
+        if (current != this.level) {
             this.clear();
-            this.dimension = current;
+            this.level = current;
         }
         var sections = beacon.getBeamSections();
         long key = beacon.getBlockPos().asLong();
@@ -72,7 +77,11 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
     @Override
     public void render(AbstractRenderPipeline pipeline, Viewport<?> viewport, int depthFunc) {
         var mc = Minecraft.getInstance();
-        if (mc.level == null || !mc.level.dimension().equals(this.dimension) || !VoxyConfig.CONFIG.distantBeacons) return;
+        if (mc.level != this.level) {
+            this.clear();
+            this.level = mc.level;
+        }
+        if (mc.level == null || !VoxyConfig.CONFIG.distantBeacons) return;
         double vanilla = Math.min(256.0, mc.options.getEffectiveRenderDistance() * 16.0);
         double min = Math.max(16.0, vanilla - 8.0), minSq = min * min;
         double max = VoxyConfig.CONFIG.distantBeaconMaxChunks == 0

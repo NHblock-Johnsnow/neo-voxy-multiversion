@@ -24,6 +24,7 @@ public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
     private static boolean simulatedInstalled;
     private static boolean bitsNBobsInstalled;
     private static boolean azimuthInstalled;
+    private static boolean littleTilesInstalled;
 
     private static boolean isLoadedEarly(String modId) {
         var list = LoadingModList.get();
@@ -46,6 +47,7 @@ public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
         simulatedInstalled = isLoadedEarly("simulated");
         bitsNBobsInstalled = isLoadedEarly("bits_n_bobs");
         azimuthInstalled = isLoadedEarly("azimuth");
+        littleTilesInstalled = isLoadedEarly("littletiles");
 
         if (isLoadedEarly("eclipticseasons_voxycompact")) {
             org.slf4j.LoggerFactory.getLogger("voxy").error(
@@ -113,10 +115,14 @@ public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
             mixins.add("create.MixinContraptionDisassembly");
             // Remove a frozen kinetic copy as soon as the live block leaves a loaded chunk.
             mixins.add("create.MixinLevelChunkKineticRemoval");
+            mixins.add("create.MixinSmartBlockEntity");
             // Gantry identity, per-entity Flywheel presence, and a shared capture clock.
             mixins.add("create.AccessorGantryContraptionEntity");
             mixins.add("create.AccessorFlywheelStorage");
             mixins.add("create.MixinAnimationTickHolder");
+        }
+        if (littleTilesInstalled) {
+            mixins.add("littletiles.MixinLittleTilesBlockEntity");
         }
         if (sodiumExtraInstalled) {
             mixins.add("sodiumextra.MixinFogDistanceHelper");

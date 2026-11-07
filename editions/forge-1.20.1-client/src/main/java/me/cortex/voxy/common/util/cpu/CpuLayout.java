@@ -1,15 +1,5 @@
 package me.cortex.voxy.common.util.cpu;
 
-import com.sun.jna.platform.win32.Kernel32Util;
-import com.sun.jna.platform.win32.WinNT;
-import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
-import me.cortex.voxy.common.Logger;
-import me.cortex.voxy.common.util.ThreadUtils;
-import org.lwjgl.system.Platform;
-import oshi.SystemInfo;
-
-import java.util.Arrays;
-import java.util.Random;
 
 //Represents the layout of the current cpu running on
 public class CpuLayout {
@@ -140,44 +130,6 @@ public class CpuLayout {
 
     }
 
-//? if 1.21.1 {
-    /*public static final Core[] CORES;
-    static {
-        Core[] cores = null;
-        try {
-            if (Platform.get() == Platform.WINDOWS) {
-                cores = generateCoreLayoutWindows();
-            } else if (Platform.get() == Platform.LINUX) {
-                cores = generateCoreLayoutLinux();
-            }
-        } catch (Exception e) {
-            Logger.error("Failed to generate cpu core layout, falling back to null: ", e);
-        }
-        CORES = cores;
-    }
-*///? }
-
-    public static void main(String[] args) throws InterruptedException {
-//? if 1.21.1 {
-        /*System.err.println(Arrays.toString(CORES));
-        setThreadAffinity(CORES[0], CORES[1]);
-        for (int i = 0; i < 20; i++) {
-            int finalI = i;
-            new Thread(()->{
-                setThreadAffinity(CORES[finalI&3]);
-                Random r = new Random();
-                int j= 0;
-                while (r.nextLong()!=0) {
-                    j++;
-                }
-                System.out.println(j);
-            }).start();
-        }
-        while (true) {
-            Thread.sleep(100);
-        }
-*///? }
-    }
 
     public static int getCoreCount() {
 //? if 1.20.1 {

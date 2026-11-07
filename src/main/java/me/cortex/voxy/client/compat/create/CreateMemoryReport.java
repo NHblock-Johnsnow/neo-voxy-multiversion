@@ -34,6 +34,9 @@ public final class CreateMemoryReport {
                 if (snap.bnbChain() != null) {
                     own += (long) snap.bnbChain().length * FLOAT + ARRAY_OVERHEAD;
                 }
+                if (snap.bnbLights() != null) {
+                    own += (long) snap.bnbLights().length * Integer.BYTES + ARRAY_OVERHEAD;
+                }
                 if (snap.chains() != null) {
                     own += ARRAY_OVERHEAD;
                     for (float[] row : snap.chains()) {

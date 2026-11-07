@@ -117,7 +117,7 @@ public final class Mipper {
     public static long mip(long i000, long i100, long i001, long i101,
                            long i010, long i110, long i011, long i111,
                            Mapper mapper) {
-        // 边界表层尚未回填，仍需参与下一层取样，不能被空气快捷路径吞掉。
+        // 边界表层仍未解析，需参与下一层取样，不能被空气快捷路径吞掉。
         if (Mapper.isSurfaceCarrier(i000 | i100 | i001 | i101 | i010 | i110 | i011 | i111)) {
             i000 = restorePendingSurface(i000);
             i100 = restorePendingSurface(i100);

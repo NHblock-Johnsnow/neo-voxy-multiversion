@@ -367,14 +367,15 @@ public class HierarchicalOcclusionTraverser {
 
             count = (int) ((this.requestBuffer.size()>>3)-1);
 
-            //Write back the clamped count
-            MemoryUtil.memPutInt(ptr-8, count);
         }
         //if (count > REQUEST_QUEUE_SIZE) {
         //    Logger.warn("Count larger than 'maxRequestCount', overflow captured. Overflowed by " + (count-REQUEST_QUEUE_SIZE));
         //}
         if (count != 0) {
-            this.nodeManager.submitRequestBatch(new MemoryBuffer(count*8L+8).cpyFrom(ptr-8));// the -8 is because we incremented it by 8
+            var requests = new MemoryBuffer(count * 8L + 8).cpyFrom(ptr - 8);
+            // 回读映射只读，仅在拥有的副本中更新截断后的数量。
+            MemoryUtil.memPutInt(requests.address, count);
+            this.nodeManager.submitRequestBatch(requests);
         }
     }
 

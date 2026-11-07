@@ -1,5 +1,6 @@
 package me.cortex.voxy.common.thread;
 
+import me.cortex.voxy.common.util.ExceptionCleanup;
 import it.unimi.dsi.fastutil.HashCommon;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongArrayFIFOQueue;
@@ -46,79 +47,76 @@ public class WeakConcurrentCleanableHashMap<K extends LongSupplier, V> {
 
     public V computeIfAbsent(K key, Supplier<V> valueOnAbsent) {
         this.cleanup();
-
         long id = key.getAsLong();
-        int bucket = Id2Seg(id, this.i2v.length-1);
-        var i2v = this.i2v[bucket];
+        int bucket = Id2Seg(id, this.i2v.length - 1);
+        var values = this.i2v[bucket];
         var lock = this.i2vLocks[bucket];
         lock.lock();
-        if (i2v.containsKey(id)) {
-            lock.unlock();
-            return i2v.get(id);
-        } else {
-            var v = valueOnAbsent.get();
-            i2v.put(id, v);
+        try {
+            if (values.containsKey(id)) return values.get(id);
+            V value = valueOnAbsent.get();
             this.k2iLock.lock();
+            try {
+                values.put(id, value);
+                this.k2i.put(new WeakReference<>(key, this.cleanupQueue), id);
+                this.count.incrementAndGet();
+            } finally {
+                this.k2iLock.unlock();
+            }
+            return value;
+        } finally {
+            // 工厂失败也必须解锁，读取和登记均在分段锁内完成。
             lock.unlock();
-            this.k2i.put(new WeakReference<>(key, this.cleanupQueue), id);
-            this.k2iLock.unlock();
-            this.count.incrementAndGet();
-            return v;
         }
     }
 
     public void cleanup() {
         WeakReference<K> ref = (WeakReference<K>) this.cleanupQueue.poll();
-        if (ref != null) {
-            LongArrayFIFOQueue ids = new LongArrayFIFOQueue();
-            this.k2iLock.lock();
+        if (ref == null) return;
+        var ids = new LongArrayFIFOQueue();
+        this.k2iLock.lock();
+        try {
             do {
                 long id = this.k2i.removeLong(ref);
-                if (id < 0) continue;
-                ids.enqueue(id);
+                if (id >= 0) ids.enqueue(id);
             } while ((ref = (WeakReference<K>) this.cleanupQueue.poll()) != null);
+        } finally {
             this.k2iLock.unlock();
-            if (ids.isEmpty()) return;
-            int count = ids.size();
-            while (!ids.isEmpty()) {
-                long id = ids.dequeueLong();
-                int bucket = Id2Seg(id, this.i2v.length - 1);
-                var lock = this.i2vLocks[bucket];
-                lock.lock();
-                var val = this.i2v[bucket].remove(id);
-                lock.unlock();
-                if (val != null) {
-                    this.valueCleaner.accept(val);
-                } else {
-                    count--;
-                }
-            }
-            if (this.count.addAndGet(-count)<0) {
-                throw new IllegalStateException();
-            }
         }
+        var cleanup = new ExceptionCleanup(null);
+        while (!ids.isEmpty()) {
+            long id = ids.dequeueLong();
+            int bucket = Id2Seg(id, this.i2v.length - 1);
+            var lock = this.i2vLocks[bucket];
+            V value;
+            lock.lock();
+            try {
+                value = this.i2v[bucket].remove(id);
+                if (value != null) this.count.decrementAndGet();
+            } finally {
+                lock.unlock();
+            }
+            if (value != null) cleanup.run(() -> this.valueCleaner.accept(value));
+        }
+        cleanup.rethrow();
     }
 
     public List<V> clear() {
-        this.cleanup();
-
-        List<V> values = new ArrayList<>(this.size());
-        //lock everything
-        for (var lock : this.i2vLocks) {
-            lock.lock();
-        }
+        List<V> values = new ArrayList<>();
+        for (var lock : this.i2vLocks) lock.lock();
         this.k2iLock.lock();
-        this.k2i.clear();//Clear here while its safe to do so
-        for (var i2v : this.i2v) {
-            values.addAll(i2v.values());
-            i2v.clear();
+        try {
+            this.k2i.clear();
+            for (var entries : this.i2v) {
+                values.addAll(entries.values());
+                entries.clear();
+            }
+            this.count.set(0);
+            return values;
+        } finally {
+            this.k2iLock.unlock();
+            for (var lock : this.i2vLocks) lock.unlock();
         }
-        this.count.set(0);
-        this.k2iLock.unlock();
-        for (var lock : this.i2vLocks) {
-            lock.unlock();
-        }
-        return values;
     }
 
     public int size() {

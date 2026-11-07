@@ -3,8 +3,6 @@ package me.cortex.voxy.client.core.util;
 import it.unimi.dsi.fastutil.longs.Long2ByteOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ByteMap.Entry;
 import it.unimi.dsi.fastutil.objects.ObjectIterator;
-import java.util.Random;
-import me.cortex.voxy.common.Logger;
 
 public class RingTracker {
    private final Long2ByteOpenHashMap operations = new Long2ByteOpenHashMap(8192);
@@ -210,22 +208,6 @@ public class RingTracker {
       return ret;
    }
 
-   public static void main(String[] args) {
-      for (int j = 0; j < 50; j++) {
-         Random r = new Random((j + 18723) * 1234);
-         RingTracker tracker = new RingTracker(r.nextInt(100) + 1, 0, 0, true);
-         int R = r.nextInt(500);
-
-         for (int i = 0; i < 50000; i++) {
-            int x = r.nextInt(R * 2 + 1) - R;
-            int z = r.nextInt(R * 2 + 1) - R;
-            tracker.moveCenter(x, z);
-         }
-
-         tracker.fillRing(false);
-         tracker.process(64, (xx, zx) -> Logger.info("Add:", xx, ",", zx), (xx, zx) -> Logger.info("Remove:", xx, ",", zx));
-      }
-   }
 
    public interface IUpdateConsumer {
       void accept(int var1, int var2);

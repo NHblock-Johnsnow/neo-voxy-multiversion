@@ -82,8 +82,8 @@ public class VoxyCommon {
     public static void shutdownInstance() {
         if (INSTANCE != null) {
             var instance = INSTANCE;
-            INSTANCE = null;//Make it null before shutdown
             instance.shutdown();
+            INSTANCE = null;
         }
     }
 
@@ -94,7 +94,11 @@ public class VoxyCommon {
         if (INSTANCE != null) {
             throw new IllegalStateException("Cannot create multiple instances");
         }
-        INSTANCE = FACTORY.create();
+        try {
+            INSTANCE = FACTORY.create();
+        } catch (DontCreateInstance ignored) {
+            Logger.info("Voxy instance disabled by storage configuration");
+        }
     }
 
     //Is voxy available in any capacity

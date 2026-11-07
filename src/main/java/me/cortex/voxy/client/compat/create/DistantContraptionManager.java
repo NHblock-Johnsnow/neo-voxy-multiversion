@@ -48,6 +48,7 @@ public final class DistantContraptionManager {
         //Set once a bake ran on a non-empty contraption but produced no drawable mesh (all non-MODEL
         //blocks); stops the per-tick 64KB re-bake retry for structures that can never draw.
         boolean bakeGaveNothing;
+        boolean liveBakePending;
         boolean movedWhileSeen;
         long remoteUpdatedAtNanos;
         //Network id of the entity behind the last refresh, for the renderer's frame-time lookup -
@@ -89,19 +90,40 @@ public final class DistantContraptionManager {
     //Diagnostics for /voxy debug trains
     public static volatile int snapshotCount;
 
+    private static boolean updating;
+    private static long snapshotGeneration;
+
     public static void update(ClientLevel level, double camX, double camY, double camZ, double maxDist) {
+        if (updating) return;
+        updating = true;
+        try {
+            updateSnapshots(level, camX, camY, camZ, maxDist);
+        } finally {
+            updating = false;
+        }
+    }
+
+    private static boolean isCurrentUpdate(ClientLevel level, long generation) {
+        return generation == snapshotGeneration && Minecraft.getInstance().level == level
+                && VoxyConfig.CONFIG.isRenderingEnabled() && VoxyConfig.CONFIG.distantContraptions;
+    }
+
+    private static void updateSnapshots(ClientLevel level, double camX, double camY, double camZ, double maxDist) {
         if (!VoxyConfig.CONFIG.isRenderingEnabled() || !VoxyConfig.CONFIG.distantContraptions) {
-            if (!SNAPSHOTS.isEmpty()) {
+            if (!SNAPSHOTS.isEmpty() || loadedLevel != null) {
                 clearAll();
             }
             return;
         }
-        loadStoredOnce(level);
+        loadStored(level);
+        long generation = snapshotGeneration;
         long now = System.currentTimeMillis();
         double maxDistSq = maxDist * maxDist;
         var dimId = level.dimension().location();
         applyRemotePoses(dimId, System.nanoTime(), now);
 
+        // 活跃网格与历史恢复共享预算；首次形状和姿态先保留，避免卸载丢失。
+        int bakes = 0;
         var seenThisTick = new java.util.HashSet<UUID>();
         var liveBodies = new ArrayList<double[]>();
         var liveRails = new ArrayList<double[]>();
@@ -110,6 +132,7 @@ public final class DistantContraptionManager {
                 continue;
             }
             seenThisTick.add(ce.getUUID());
+            observeRestore(ce.getUUID());
             if (ce instanceof CarriageContraptionEntity) {
                 continue;
             }
@@ -130,16 +153,30 @@ public final class DistantContraptionManager {
             snap.trackingBlocks = ce.getType().clientTrackingRange() * 16.0;
             snap.live = true;
             if (snap.mesh == null && !snap.bakeGaveNothing) {
-                if (!contraption.getBlocks().isEmpty()) {
-                    var collected = collectBlocks(contraption);
-                    snap.mesh = bakeBlocks(collected);
-                    snap.source = snap.mesh == null ? null : collected;
-                    snap.boundRadius = snap.source == null ? 0.0 : boundRadiusOf(collected);
-                    snap.bakeGaveNothing = snap.mesh == null;
+                if (!snap.liveBakePending && !contraption.getBlocks().isEmpty()) {
+                    var source = collectBlocks(contraption);
+                    if (!isCurrentUpdate(level, generation) || SNAPSHOTS.get(ce.getUUID()) != snap) return;
+                    snap.source = source;
+                    snap.boundRadius = boundRadiusOf(source);
+                    snap.liveBakePending = true;
+                }
+                if (bakes < BAKES_PER_TICK && snap.liveBakePending) {
+                    bakes++;
+                    var mesh = bakeBlocks(snap.source);
+                    // 模型回调可重载资源或删除来源，旧结果不能晚于清理发布。
+                    if (!isCurrentUpdate(level, generation) || SNAPSHOTS.get(ce.getUUID()) != snap) {
+                        if (mesh != null) mesh.close();
+                        return;
+                    }
+                    snap.mesh = mesh;
+                    if (mesh != null) residentGpuBytes += mesh.mesh.gpuByteSize();
+                    snap.bakeGaveNothing = mesh == null;
+                    snap.liveBakePending = false;
                 }
             } else if (snap.bakeGaveNothing) {
                 me.cortex.voxy.commonImpl.PerfStats.contraptionRebakeSkipped.increment();
             }
+            if (snap.source != null) updatePose(ce, snap);
             if (snap.mesh == null) {
                 trackMotion(ce, snap, now);
                 snap.x = ce.getX();
@@ -151,19 +188,6 @@ public final class DistantContraptionManager {
                 recordRail(ce, snap, liveRails);
                 liveBodies.add(new double[]{ce.getX(), ce.getY(), ce.getZ(), snap.boundRadius});
                 continue;
-            }
-            //Keep the cached transform live whenever the client has the entity.
-            SCRATCH_POSE.pushPose();
-            try {
-                ce.applyLocalTransforms(SCRATCH_POSE, 1.0f);
-                var pose = SCRATCH_POSE.last().pose();
-                if (Math.abs(pose.m30()) < 100_000f && Math.abs(pose.m31()) < 100_000f
-                        && Math.abs(pose.m32()) < 100_000f) {
-                    snap.local.set(pose);
-                }
-            } catch (Throwable ignored) {
-            } finally {
-                SCRATCH_POSE.popPose();
             }
             trackMotion(ce, snap, now);
             snap.x = ce.getX();
@@ -222,7 +246,10 @@ public final class DistantContraptionManager {
             }
         }
 
-        bakeDormant(camX, camY, camZ, maxDist);
+        // 本轮常规删除已完成；后续烘焙从当前代次开始，避免跳过正常预算结算。
+        generation = snapshotGeneration;
+        bakeDormant(camX, camY, camZ, maxDist, BAKES_PER_TICK - bakes);
+        if (!isCurrentUpdate(level, generation)) return;
 
         double reach = net.minecraft.client.Minecraft.getInstance().options.getEffectiveRenderDistance() * 16.0;
         SNAPSHOTS.entrySet().removeIf(entry -> {
@@ -234,6 +261,7 @@ public final class DistantContraptionManager {
             //refills it is a live re-sighting, which mints its own fields anyway. Nothing on disk
             //either - the save rejects a null source.
             if (s.mesh == null && s.source == null && now - s.lastSeenMs >= 2000) {
+                observeRestore(entry.getKey());
                 return true;
             }
             double sx = s.x - camX, sy = s.y - camY, sz = s.z - camZ;
@@ -244,9 +272,8 @@ public final class DistantContraptionManager {
                 double bodyReach = presenceRadius + s.boundRadius;
                 if (anchorDistSq <= bodyReach * bodyReach
                         && now - s.lastSeenMs >= 2000 && disassembledInPlace(level, s)) {
-                    if (s.mesh != null) {
-                        s.mesh.close();
-                    }
+                    closeMesh(s);
+                    observeRestore(entry.getKey());
                     if (storage != null) {
                         ContraptionStore.remove(storage, entry.getKey());
                     }
@@ -262,9 +289,8 @@ public final class DistantContraptionManager {
             if (!level.isLoaded(net.minecraft.core.BlockPos.containing(s.x, s.y, s.z))) {
                 return false;
             }
-            if (s.mesh != null) {
-                s.mesh.close();
-            }
+            closeMesh(s);
+            observeRestore(entry.getKey());
             //Presence removal means the structure no longer exists - the record goes with it, or the
             //same ghost restores at the next world entry and has to be walked to all over again.
             if (storage != null) {
@@ -357,6 +383,21 @@ public final class DistantContraptionManager {
     public static boolean hasFreshRemotePose(Snapshot snap, long nowNanos) {
         return snap.remoteUpdatedAtNanos != 0
                 && nowNanos - snap.remoteUpdatedAtNanos <= REMOTE_TIMEOUT_NANOS;
+    }
+
+    private static void updatePose(AbstractContraptionEntity ce, Snapshot snap) {
+        SCRATCH_POSE.pushPose();
+        try {
+            ce.applyLocalTransforms(SCRATCH_POSE, 1.0f);
+            var pose = SCRATCH_POSE.last().pose();
+            if (Math.abs(pose.m30()) < 100_000f && Math.abs(pose.m31()) < 100_000f
+                    && Math.abs(pose.m32()) < 100_000f) {
+                snap.local.set(pose);
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            SCRATCH_POSE.popPose();
+        }
     }
 
     private static void trackMotion(AbstractContraptionEntity ce, Snapshot snap, long now) {
@@ -490,40 +531,40 @@ public final class DistantContraptionManager {
         return engine == null ? null : engine.storage;
     }
 
-    private static ResourceLocation loadedFor;
+    private static ClientLevel loadedLevel;
+    private static me.cortex.voxy.common.world.WorldEngine loadedEngine;
+    private static me.cortex.voxy.client.compat.AuxiliaryTableLoader<ContraptionStore.Stored> restoreLoad;
+    private static final java.util.Set<UUID> restoreObserved = new java.util.HashSet<>();
+    private static int restoredCount;
 
-    private static void loadStoredOnce(ClientLevel level) {
-        var here = level.dimension().location();
-        if (here.equals(loadedFor)) {
-            return;
-        }
-        var storage = storageFor(level);
-        if (storage == null) {
-            //Engine not up yet - try again next tick
-            return;
-        }
-        loadedFor = here;
-        loadStored(level);
+    private static void observeRestore(UUID id) {
+        if (restoreLoad != null) restoreObserved.add(id);
     }
 
     public static void loadStored(ClientLevel level) {
-        var storage = storageFor(level);
-        if (storage == null) {
-            return;
+        if (Minecraft.getInstance().level != level) return;
+        var engine = me.cortex.voxy.commonImpl.WorldIdentifier.ofEngineNullable(level);
+        if (loadedLevel != level || loadedEngine != engine) {
+            if (loadedLevel != null && (loadedLevel != level || loadedEngine != null)) clearAll();
+            loadedLevel = level;
+            loadedEngine = engine;
+            if (engine != null && engine.isLive() && engine.storage.supportsAuxTable(ContraptionStore.TABLE)) {
+                var dimension = level.dimension().location();
+                restoreLoad = new me.cortex.voxy.client.compat.AuxiliaryTableLoader<>(engine, ContraptionStore.TABLE,
+                        (key, bytes) -> ContraptionStore.decode(bytes, dimension), ContraptionStore.Stored::estimatedBytes);
+            }
         }
+        var load = restoreLoad;
+        if (load == null) return;
         var here = level.dimension().location();
-        int restored = 0;
-        for (var entry : ContraptionStore.loadAll(storage)) {
-            //Another dimension's records stay on disk; they are read again when the player goes there
-            if (!here.equals(entry.dim()) || SNAPSHOTS.containsKey(entry.id())) {
-                continue;
-            }
-            if (Math.abs(entry.x()) > 1.0e6 || Math.abs(entry.z()) > 1.0e6) {
-                continue;
-            }
+        // 后台限量缓存，前台只安装 CPU 元数据；GPU 仍走既有两次烘焙额度。
+        load.drain(16, (key, entry) -> {
+            if (restoreLoad != load || loadedLevel != level || Minecraft.getInstance().level != level
+                    || !here.equals(entry.dim()) || restoreObserved.contains(entry.id())
+                    || SNAPSHOTS.containsKey(entry.id())) return;
             var snap = new Snapshot();
             snap.source = entry.source();
-            snap.boundRadius = boundRadiusOf(entry.source());
+            snap.boundRadius = entry.boundRadius();
             snap.local.set(entry.pose());
             snap.x = entry.x();
             snap.y = entry.y();
@@ -533,21 +574,35 @@ public final class DistantContraptionManager {
             snap.lastSeenMs = System.currentTimeMillis();
             snap.live = false;
             SNAPSHOTS.put(entry.id(), snap);
-            restored++;
-        }
+            restoredCount++;
+        });
         snapshotCount = SNAPSHOTS.size();
-        if (restored != 0) {
-            me.cortex.voxy.common.Logger.info("Restored " + restored + " distant contraption(s) for " + here);
+        if (restoreLoad == load && load.isFinished()) {
+            load.close();
+            restoreLoad = null;
+            restoreObserved.clear();
+            if (restoredCount != 0) {
+                me.cortex.voxy.common.Logger.info("Restored " + restoredCount + " distant contraption(s) for " + here);
+            }
+            restoredCount = 0;
         }
     }
 
 
 
+    private static long closeMesh(Snapshot snap) {
+        if (snap.mesh == null) return 0;
+        long bytes = snap.mesh.mesh.gpuByteSize();
+        snap.mesh.close();
+        snap.mesh = null;
+        // 发布与释放即时结算，历史接纳使用本 tick 的实际驻留量。
+        residentGpuBytes -= bytes;
+        return bytes;
+    }
+
     private static void dropMesh(Snapshot snap) {
         if (snap.mesh != null) {
-            snap.lastMeshBytes = snap.mesh.mesh.gpuByteSize();
-            snap.mesh.close();
-            snap.mesh = null;
+            snap.lastMeshBytes = closeMesh(snap);
             me.cortex.voxy.commonImpl.PerfStats.contraptionSnapshotEvicted.increment();
         }
     }
@@ -558,56 +613,45 @@ public final class DistantContraptionManager {
         return snap.mesh == null && snap.source != null && !snap.bakeGaveNothing;
     }
 
+    private record GpuEviction(Snapshot snapshot, double distanceSquared) {}
+
     private static void enforceGpuBudget(double camX, double camY, double camZ) {
         long budget = (long) VoxyConfig.CONFIG.distantContraptionGpuBudgetMiB * 1024L * 1024L;
         if (budget <= 0) {
             return;
         }
-        long resident = 0;
+        if (residentGpuBytes <= budget) return;
+        var candidates = new java.util.ArrayList<GpuEviction>();
         for (var snap : SNAPSHOTS.values()) {
-            if (snap.mesh != null) {
-                resident += snap.mesh.mesh.gpuByteSize();
-            }
+            if (snap.mesh == null || snap.live) continue;
+            double dx = snap.x - camX, dy = snap.y - camY, dz = snap.z - camZ;
+            double distanceSquared = dx * dx + dy * dy + dz * dz;
+            if (distanceSquared >= 0.0) candidates.add(new GpuEviction(snap, distanceSquared));
         }
-        //Down to a fraction of the budget rather than exactly to it, or the next structure to come into
-        //range evicts one and the one after that evicts it back
+        // 超预算才排序一次，逐个回收到九成水位，避免每释放一个网格都重扫全表。
+        candidates.sort(java.util.Comparator.comparingDouble(GpuEviction::distanceSquared).reversed());
         long target = (budget * 9L) / 10L;
-        while (resident > budget) {
-            Snapshot furthest = null;
-            double furthestDistSq = -1;
-            for (var snap : SNAPSHOTS.values()) {
-                if (snap.mesh == null || snap.live) {
-                    continue;
-                }
-                double dx = snap.x - camX, dy = snap.y - camY, dz = snap.z - camZ;
-                double distSq = dx * dx + dy * dy + dz * dz;
-                if (distSq > furthestDistSq) {
-                    furthestDistSq = distSq;
-                    furthest = snap;
-                }
-            }
-            if (furthest == null) {
-                //Everything left is live, i.e. Create is drawing it and we are not holding it for long
-                break;
-            }
-            resident -= furthest.mesh.mesh.gpuByteSize();
-            dropMesh(furthest);
-            if (resident <= target) {
-                break;
+        for (var candidate : candidates) {
+            if (residentGpuBytes <= target) break;
+            Snapshot snap = candidate.snapshot;
+            if (snap.mesh != null) {
+                dropMesh(snap);
             }
         }
-        residentGpuBytes = resident;
     }
 
     //Rebuilds a few dormant snapshots per tick, nearest first, while there is budget for them. Same
     //pacing as the restore path for the same reason: baking uploads a buffer.
-    private static void bakeDormant(double camX, double camY, double camZ, double maxDist) {
+    private static void bakeDormant(double camX, double camY, double camZ, double maxDist, int allowance) {
+        if (allowance <= 0) return;
+        var level = Minecraft.getInstance().level;
+        long generation = snapshotGeneration;
         long budget = (long) VoxyConfig.CONFIG.distantContraptionGpuBudgetMiB * 1024L * 1024L;
         double maxDistSq = maxDist * maxDist;
         //Candidates rejected for size this tick. Without this the loop keeps picking the same nearest
         //one, finds it does not fit, and burns its whole allowance doing nothing.
         var tooBig = new java.util.HashSet<Snapshot>();
-        for (int done = 0; done < BAKES_PER_TICK; done++) {
+        for (int done = 0; done < allowance; done++) {
             Snapshot nearest = null;
             double nearestDistSq = Double.MAX_VALUE;
             for (var snap : SNAPSHOTS.values()) {
@@ -634,6 +678,11 @@ public final class DistantContraptionManager {
                 continue;
             }
             var mesh = bakeBlocks(nearest.source);
+            if (!isCurrentUpdate(level, generation)) {
+                if (mesh != null) mesh.close();
+                return;
+            }
+            nearest.liveBakePending = false;
             if (mesh == null) {
                 nearest.bakeGaveNothing = true;
                 continue;
@@ -647,7 +696,7 @@ public final class DistantContraptionManager {
                             (int) Math.floor(nearest.x), (int) Math.floor(nearest.y), (int) Math.floor(nearest.z));
                 }
             }
-            residentGpuBytes += mesh.mesh.gpuByteSize();
+            residentGpuBytes += nearest.lastMeshBytes;
         }
     }
 
@@ -717,10 +766,11 @@ public final class DistantContraptionManager {
     //A contraption that died (disassembled back into blocks, broken, killed) no longer exists - its
     //snapshot must go immediately. Only unloading (the player walking away) freezes a leave-behind.
     public static void removeDead(UUID id) {
+        observeRestore(id);
         Snapshot snap = SNAPSHOTS.remove(id);
-        if (snap != null && snap.mesh != null) {
-            snap.mesh.close();
-        }
+        // 保留活动更新门禁；正在回调中的任务由外层检查代次并回收。
+        if (snap != null) snapshotGeneration++;
+        if (snap != null) closeMesh(snap);
         var level = Minecraft.getInstance().level;
         if (level != null) {
             var storage = storageFor(level);
@@ -731,15 +781,31 @@ public final class DistantContraptionManager {
         snapshotCount = SNAPSHOTS.size();
     }
 
-    public static void clearAll() {
+    public static void onResourceReload() {
+        snapshotGeneration++;
         for (var snap : SNAPSHOTS.values()) {
-            if (snap.mesh != null) {
-                snap.mesh.close();
-            }
+            closeMesh(snap);
+            snap.lastMeshBytes = 0;
+            snap.bakeGaveNothing = false;
+            snap.liveBakePending = false;
+        }
+        residentGpuBytes = 0;
+    }
+
+    public static void clearAll() {
+        snapshotGeneration++;
+        if (restoreLoad != null) restoreLoad.close();
+        restoreLoad = null;
+        restoreObserved.clear();
+        restoredCount = 0;
+        loadedLevel = null;
+        loadedEngine = null;
+        for (var snap : SNAPSHOTS.values()) {
+            closeMesh(snap);
         }
         SNAPSHOTS.clear();
         REMOTE_POSES.clear();
-        loadedFor = null;
         snapshotCount = 0;
+        residentGpuBytes = 0;
     }
 }

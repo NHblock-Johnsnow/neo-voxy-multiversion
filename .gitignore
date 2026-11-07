@@ -1,22 +1,18 @@
-# Generated files (root project and editions)
+# Generated files in every edition
 .gradle/
 .idea/
+.vscode/
 .lwjgl/
 build/
 /dist/
 run/
 out/
 logs/
-
 bin/
 .classpath
 .project
 *.launch
 .settings/
-
-.vscode/
-
-# Local logs, crash dumps and editor leftovers
 *.log
 *.hprof
 *.class
@@ -31,17 +27,3 @@ Desktop.ini
 __pycache__/
 *.pyc
 *.pyo
-
-# compile-only third-party jars, drop them in yourself (see README)
-/libs/
-
-# local workspace notes
-/ARCHITECTURE.md
-/HANDOFF.md
-/VOXY-0216-PROGRESS.md
-/VOXY-0216-REBASE-PLAN.md
-/VOXY-OPTIMIZATION-AUDIT.md
-/FRAME-COST-AUDIT.md
-/BIG-ITEMS-PLAN.md
-/PRE-PUSH-AUDIT.md
-/UPSTREAM-MERGE-PLAN.md

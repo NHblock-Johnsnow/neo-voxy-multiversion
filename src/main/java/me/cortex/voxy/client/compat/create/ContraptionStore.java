@@ -24,8 +24,8 @@ import java.util.UUID;
 
 public final class ContraptionStore {
     public static final String TABLE = "create_contraptions";
-    //FORMAT 3 persists the render NBT required by copycat models.
-    private static final byte FORMAT = 3;
+    // 格式 3 保留渲染 NBT，格式 4 支持超过 u16 容量的材质表。
+    private static final byte FORMAT = 4;
     //A contraption is bounded by the +-127 local coordinate packing, so its block count cannot approach
     //this; the cap only stops a corrupt length from allocating wildly
     private static final int MAX_BLOCKS = 1 << 20;
@@ -34,7 +34,7 @@ public final class ContraptionStore {
 
     public record Stored(UUID id, DistantContraptionManager.Source source,
                          Matrix4f pose, double x, double y, double z, ResourceLocation dim,
-                         double trackingBlocks) {}
+                         double trackingBlocks, double boundRadius, long estimatedBytes) {}
 
     //UUIDs do not fit a long key, so the two halves are mixed. A collision would show one contraption in
     //place of another, which is why the record carries its own id and the loader checks it.
@@ -90,9 +90,10 @@ public final class ContraptionStore {
             });
         }
 
-        var bytes = new ByteArrayOutputStream(blocks.size() * 4 + 512);
+        boolean intIndex = palette.size() > 65536;
+        var bytes = new ByteArrayOutputStream(blocks.size() * (intIndex ? 7 : 5) + 512);
         var out = new DataOutputStream(bytes);
-        out.writeByte(FORMAT);
+        out.writeByte(intIndex ? FORMAT : 3);
         out.writeLong(id.getMostSignificantBits());
         out.writeLong(id.getLeastSignificantBits());
         out.writeDouble(snap.x());
@@ -138,7 +139,9 @@ public final class ContraptionStore {
             out.writeByte(block.y());
             out.writeByte(block.z());
             int idx = paletteIndex.get(block.state());
-            if (wide) {
+            if (intIndex) {
+                out.writeInt(idx);
+            } else if (wide) {
                 out.writeShort(idx);
             } else {
                 out.writeByte(idx);
@@ -149,6 +152,10 @@ public final class ContraptionStore {
     }
 
     private static Stored decode(byte[] value) {
+        return decode(value, null);
+    }
+
+    static Stored decode(byte[] value, ResourceLocation dimension) {
         if (value == null || value.length < 2 || value[0] < 1 || value[0] > FORMAT) {
             return null;
         }
@@ -157,6 +164,9 @@ public final class ContraptionStore {
             double x = in.readDouble(), y = in.readDouble(), z = in.readDouble();
             double trackingBlocks = value[0] >= 2 ? in.readDouble() : 80.0;
             var dim = ResourceLocation.parse(in.readUTF());
+            if (dimension != null && (!dimension.equals(dim) || Math.abs(x) > 1.0e6 || Math.abs(z) > 1.0e6)) {
+                return null;
+            }
             var pose = new Matrix4f();
             float[] raw = new float[16];
             for (int i = 0; i < 16; i++) {
@@ -170,7 +180,8 @@ public final class ContraptionStore {
             }
             byte[] paletteRaw = new byte[paletteBytes];
             in.readFully(paletteRaw);
-            var root = NbtIo.readCompressed(new ByteArrayInputStream(paletteRaw), NbtAccounter.unlimitedHeap());
+            var accounter = NbtAccounter.unlimitedHeap();
+            var root = NbtIo.readCompressed(new ByteArrayInputStream(paletteRaw), accounter);
             var paletteTag = root.getList("palette", 10);
             var palette = new ArrayList<BlockState>(paletteTag.size());
             for (int i = 0; i < paletteTag.size(); i++) {
@@ -186,16 +197,19 @@ public final class ContraptionStore {
             boolean wide = palette.size() > 255;
             var blocks = new ArrayList<ShapeBlock>(count);
             var states = new HashMap<net.minecraft.core.BlockPos, BlockState>(count * 2);
+            int furthestSq = 0;
             for (int i = 0; i < count; i++) {
                 byte bx = in.readByte(), by = in.readByte(), bz = in.readByte();
-                int idx = wide ? in.readUnsignedShort() : in.readUnsignedByte();
-                if (idx >= palette.size()) {
+                int idx = value[0] >= 4 ? in.readInt() : wide ? in.readUnsignedShort() : in.readUnsignedByte();
+                if (idx < 0 || idx >= palette.size()) {
                     return null;
                 }
                 var state = palette.get(idx);
                 if (state != null) {
                     blocks.add(new ShapeBlock(bx, by, bz, state));
                     states.put(new net.minecraft.core.BlockPos(bx, by, bz), state);
+                    int ax = Math.abs(bx) + 1, ay = Math.abs(by) + 1, az = Math.abs(bz) + 1;
+                    furthestSq = Math.max(furthestSq, ax * ax + ay * ay + az * az);
                 }
             }
             if (blocks.isEmpty()) {
@@ -223,7 +237,7 @@ public final class ContraptionStore {
                 if (modelData.isEmpty()) modelData = null;
             }
             return new Stored(id, new DistantContraptionManager.Source(blocks, modelData, renderNbt), pose, x, y, z, dim,
-                    trackingBlocks);
+                    trackingBlocks, Math.sqrt(furthestSq), 256L + blocks.size() * 128L + accounter.getUsage() * 2L);
         } catch (Throwable t) {
             Logger.error("Decoding a stored contraption snapshot; dropping it", t);
             return null;

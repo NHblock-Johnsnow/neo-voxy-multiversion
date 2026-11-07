@@ -11,14 +11,16 @@ import java.nio.ByteBuffer;
 
 public final class BeaconIndex {
     public static final String TABLE = "beacons";
-    private static final byte FORMAT = 1;
+    private static final byte FORMAT = 2;
 
     private final SectionStorage storage;
     private final boolean persistent;
     //Section key -> packed local positions. Written from ingest workers, read from the render thread.
     private final Long2ObjectMap<short[]> sections = Long2ObjectMaps.synchronize(new Long2ObjectOpenHashMap<>());
+    private final Object[] updateLocks = new Object[16];
 
     public BeaconIndex(SectionStorage storage) {
+        java.util.Arrays.setAll(this.updateLocks, i -> new Object());
         this.storage = storage;
         this.persistent = storage.supportsAuxTable(TABLE);
         if (this.persistent) {
@@ -60,28 +62,45 @@ public final class BeaconIndex {
         this.listener = listener;
     }
 
+    /** 初始化快照和安装监听器之间不允许区段发布；锁顺序始终为区段锁在前。 */
+    public void initializeListener(ChangeListener listener, Runnable initializeSnapshot) {
+        this.initializeListener(0, listener, initializeSnapshot);
+    }
+
+    private void initializeListener(int stripe, ChangeListener listener, Runnable initializeSnapshot) {
+        if (stripe == this.updateLocks.length) {
+            initializeSnapshot.run();
+            this.listener = listener;
+            return;
+        }
+        synchronized (this.updateLocks[stripe]) {
+            this.initializeListener(stripe + 1, listener, initializeSnapshot);
+        }
+    }
+
     public void setSection(int sx, int sy, int sz, short[] packedLocals) {
         long key = BlockPos.asLong(sx, sy, sz);
-        if (packedLocals == null || packedLocals.length == 0) {
-            //Only touch the store if we had something here: the common case is a section that never held a
-            //beacon and never will, and issuing a delete for each of those would swamp the write path.
-            short[] old = this.sections.remove(key);
-            if (old != null) {
+        Object updateLock = this.updateLocks[Long.hashCode(key ^ (key >>> 17)) & (this.updateLocks.length - 1)];
+        synchronized (updateLock) {
+            short[] old = this.sections.get(key);
+            short[] next = packedLocals == null || packedLocals.length == 0 ? null : packedLocals;
+            if (java.util.Arrays.equals(old, next)) return;
+            // 同一区段的写盘、发布和通知保持顺序；失败时保留旧值供下次重试。
+            if (next == null) {
                 if (this.persistent) {
                     this.storage.deleteAux(TABLE, key);
                 }
+                this.sections.remove(key);
                 this.fireDiff(sx, sy, sz, old, null);
+            } else {
+                next = next.clone();
+                if (this.persistent) {
+                    this.storage.putAux(TABLE, key, encode(next));
+                }
+                this.sections.put(key, next);
+                this.fireDiff(sx, sy, sz, old, next);
             }
-            return;
         }
-        short[] old = this.sections.put(key, packedLocals);
-        if (old != null && java.util.Arrays.equals(old, packedLocals)) {
-            return;
-        }
-        if (this.persistent) {
-            this.storage.putAux(TABLE, key, encode(packedLocals));
-        }
-        this.fireDiff(sx, sy, sz, old, packedLocals);
     }
 
     private void fireDiff(int sx, int sy, int sz, short[] old, short[] now) {
@@ -159,9 +178,10 @@ public final class BeaconIndex {
     }
 
     private static byte[] encode(short[] locals) {
-        var buff = ByteBuffer.allocate(2 + locals.length * 2);
+        if (locals.length > 4096) throw new IllegalArgumentException("Too many beacons in a section");
+        var buff = ByteBuffer.allocate(3 + locals.length * 2);
         buff.put(FORMAT);
-        buff.put((byte) Math.min(locals.length, 255));
+        buff.putShort((short) locals.length);
         for (short local : locals) {
             buff.putShort(local);
         }
@@ -169,14 +189,24 @@ public final class BeaconIndex {
     }
 
     private static short[] decode(byte[] value) {
-        if (value == null || value.length < 2 || value[0] != FORMAT) {
+        if (value == null || value.length < 2) {
             return null;
         }
-        int count = value[1] & 0xFF;
-        if (value.length < 2 + count * 2) {
+        int offset;
+        int count;
+        if (value[0] == 1) {
+            offset = 2;
+            // 旧格式数量被截到 255，但完整 payload 仍在，按长度恢复。
+            count = (value.length - offset) / 2;
+            if ((value[1] & 0xFF) != Math.min(count, 255)) return null;
+        } else if (value[0] == FORMAT && value.length >= 3) {
+            offset = 3;
+            count = Short.toUnsignedInt(ByteBuffer.wrap(value).getShort(1));
+        } else {
             return null;
         }
-        var buff = ByteBuffer.wrap(value, 2, count * 2);
+        if (count > 4096 || value.length != offset + count * 2) return null;
+        var buff = ByteBuffer.wrap(value, offset, count * 2);
         short[] locals = new short[count];
         for (int i = 0; i < count; i++) {
             locals[i] = buff.getShort();

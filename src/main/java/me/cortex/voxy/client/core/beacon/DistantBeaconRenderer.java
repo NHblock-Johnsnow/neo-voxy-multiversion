@@ -204,7 +204,7 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
     private void processChanges(me.cortex.voxy.common.world.WorldEngine engine, Viewport<?> viewport, Minecraft mc) {
         this.drainDirty.clear();
         this.drainRemoved.clear();
-        BeaconBeamTracker.drain(this.drainDirty, this.drainRemoved);
+        BeaconBeamTracker.drain(this.drainDirty, this.drainRemoved, SOLVES_PER_FRAME);
 
         for (int i = 0; i < this.drainRemoved.size(); i++) {
             BeaconState state = this.states.remove(this.drainRemoved.getLong(i));
@@ -222,15 +222,9 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
         double maxDist = VoxyConfig.CONFIG.createRenderDistance(VoxyConfig.CONFIG.distantBeaconMaxChunks) + 128.0;
         double maxDistSq = maxDist * maxDist;
         long now = System.currentTimeMillis();
-        int solved = 0;
-        try {
-            for (int i = 0; i < this.drainDirty.size(); i++) {
-                long pos = this.drainDirty.getLong(i);
-                if (solved >= SOLVES_PER_FRAME) {
-                    //Budget spent: what is left stays queued and drains over the coming frames
-                    BeaconBeamTracker.queueDirty(pos);
-                    continue;
-                }
+        for (int i = 0; i < this.drainDirty.size(); i++) {
+            long pos = this.drainDirty.getLong(i);
+            try {
                 if (!BeaconBeamTracker.isTracked(pos)) {
                     BeaconState stale = this.states.remove(pos);
                     if (stale != null && stale.mesh != null) {
@@ -251,11 +245,14 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
                     }
                     continue;
                 }
-                solved++;
                 this.solveOne(engine, mc, pos, bx, by, bz, now);
+            } catch (RuntimeException | LinkageError t) {
+                // 单根光柱失败保留旧网格并退避，不能丢掉同批剩余项。
+                BeaconState state = this.states.computeIfAbsent(pos, ignored -> new BeaconState());
+                state.retryAtMs = now + LOOKUP_RETRY_MS;
+                this.nextRetryMs = Math.min(this.nextRetryMs, state.retryAtMs);
+                Logger.error("Building distant beacon beam at " + BlockPos.of(pos), t);
             }
-        } catch (Throwable t) {
-            Logger.error("Building distant beacon beams", t);
         }
     }
 
@@ -430,10 +427,10 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
             }
             if (state == null) {
                 //Came into range without a voxel change - first sight, or returning after eviction
-                if (distanceSq <= prepareSq) BeaconBeamTracker.queueDirty(pos);
+                if (distanceSq <= prepareSq) BeaconBeamTracker.queueDirty(engine, pos);
             } else if (state.retryAtMs != 0 && now >= state.retryAtMs) {
                 state.retryAtMs = 0;
-                BeaconBeamTracker.queueDirty(pos);
+                BeaconBeamTracker.queueDirty(engine, pos);
             } else if (state.retryAtMs != 0) {
                 this.nextRetryMs = Math.min(this.nextRetryMs, state.retryAtMs);
             }
@@ -444,21 +441,25 @@ public final class DistantBeaconRenderer implements LodPipelineHooks.Renderer {
     //Four sides of a square column per segment, textured along Y the way vanilla's beam is
     private static DistantMesh bake(List<BeaconBeamSolver.Segment> segments, int beaconY) {
         var builder = new DistantMeshBuilder(false);
-        for (var segment : segments) {
-            float y0 = segment.yBottom() - beaconY;
-            float y1 = segment.yTop() - beaconY;
-            float r = CORE_RADIUS;
-            //V follows world height so the texture scrolls with length rather than stretching
-            float v0 = segment.yBottom();
-            float v1 = segment.yTop();
-            int rgb = segment.colorRgb();
-            //Full sky light: the beam is its own light source and must not be shaded by where it sits
-            side(builder, -r, y0, -r, r, y1, -r, v0, v1, rgb, 2);
-            side(builder, r, y0, r, -r, y1, r, v0, v1, rgb, 3);
-            side(builder, r, y0, -r, r, y1, r, v0, v1, rgb, 4);
-            side(builder, -r, y0, r, -r, y1, -r, v0, v1, rgb, 5);
+        try {
+            for (var segment : segments) {
+                float y0 = segment.yBottom() - beaconY;
+                float y1 = segment.yTop() - beaconY;
+                float r = CORE_RADIUS;
+                //V follows world height so the texture scrolls with length rather than stretching
+                float v0 = segment.yBottom();
+                float v1 = segment.yTop();
+                int rgb = segment.colorRgb();
+                //Full sky light: the beam is its own light source and must not be shaded by where it sits
+                side(builder, -r, y0, -r, r, y1, -r, v0, v1, rgb, 2);
+                side(builder, r, y0, r, -r, y1, r, v0, v1, rgb, 3);
+                side(builder, r, y0, -r, r, y1, r, v0, v1, rgb, 4);
+                side(builder, -r, y0, r, -r, y1, -r, v0, v1, rgb, 5);
+            }
+            return builder.isEmpty() ? null : builder.build();
+        } finally {
+            builder.discard();
         }
-        return builder.isEmpty() ? null : builder.build();
     }
 
     private static void side(DistantMeshBuilder builder, float x0, float y0, float z0,

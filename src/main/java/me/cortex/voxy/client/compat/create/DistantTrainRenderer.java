@@ -52,6 +52,19 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
     //Resolves a bogey description to its captured snapshot mesh; set from Voxy init when Create is
     //present (the provider class touches Create's registries).
     public static java.util.function.Function<ShapeBogey, DistantMesh> bogeyMeshProvider;
+    public static java.util.function.BooleanSupplier bogeyMeshCaptureActive;
+    public static Runnable bogeyMeshResetter;
+    static int bogeyMeshGeneration;
+
+    @SubscribeEvent
+    public void onClientTick(net.neoforged.neoforge.client.event.ClientTickEvent.Post event) {
+        DistantTrainManager.expirePackets();
+        var cfg = VoxyConfig.CONFIG;
+        if (Minecraft.getInstance().level != null && cfg.isRenderingEnabled() && cfg.distantTrains
+                && me.cortex.voxy.client.ServerCapabilities.trains()) {
+            DistantTrainManager.rebuildPending();
+        }
+    }
     //Diagnostics for /voxy debug trains: how many carriages the last frame actually drew
     public static volatile int lastFrameCarriagesDrawn;
     private static final ArrayList<DepthDraw> DEPTH_DRAWS = new ArrayList<>();
@@ -101,7 +114,7 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
         Vec3 cameraPos = new Vec3(camX, camY, camZ);
         boolean flywheelRendering = VisualizationManager.supportsVisualization(mc.level);
 
-        boolean renderStateActive = false;
+        var drawState = new DrawState(pipeline, mc.level, depthFunc, nowMs);
         int drawn = 0;
         var transform = new Matrix4f();
         var model = new Matrix4f();
@@ -150,74 +163,37 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
                         continue;
                     }
 
-                    //A carriage rotates with its track, so its model-local box cannot be used directly -
-                    //the widest extent is taken as a radius instead, which no rotation can exceed. Also
-                    //covers the bogeys drawn just below, which sit at the same place.
-                    if (viewport != null) {
-                        var cm = entry.mesh().mesh;
-                        float r = Math.max(
-                                Math.max(Math.max(Math.abs(cm.minX), Math.abs(cm.maxX)),
-                                         Math.max(Math.abs(cm.minY), Math.abs(cm.maxY))),
-                                Math.max(Math.abs(cm.minZ), Math.abs(cm.maxZ)));
-                        if (!DistantVisibility.isBoxVisible(viewport,
-                                camX + dx - r, camY + dy - r, camZ + dz - r,
-                                camX + dx + r, camY + dy + r, camZ + dz + r)) {
-                            continue;
-                        }
-                    }
-
-                    //Real cached light at the carriage position (voxy voxel store), at most 1s stale
-                    if (track.lightPacked < 0 || nowMs - track.lightSampledAtMs > 1000) {
-                        track.lightPacked = DistantLightSampler.samplePeek(mc.level,
-                                (int) java.lang.Math.floor(px), (int) java.lang.Math.floor(py), (int) java.lang.Math.floor(pz));
-                        track.lightSampledAtMs = nowMs;
-                    }
-
-                    if (!renderStateActive) {
-                        DistantShaders.forPipeline(pipeline, true).bind();
-                        DistantShaders.bindTextures();
-                        glEnable(GL_DEPTH_TEST);
-                        glDepthFunc(depthFunc);
-                        glDepthMask(true);
-                        glDisable(GL_CULL_FACE);
-                        //Bit 0 is clear so Voxy translucent terrain cannot cover train pixels.
-                        glEnable(GL_STENCIL_TEST);
-                        glStencilFunc(GL_ALWAYS, 2, 0xFF);
-                        glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
-                        renderStateActive = true;
-                    }
-
+                    var cm = entry.mesh().mesh;
                     model.identity()
                             .translate((float) dx, (float) dy + 0.5f, (float) dz)
                             .rotateY((float) java.lang.Math.toRadians(-yaw))
                             .rotateZ((float) java.lang.Math.toRadians(pitch))
                             .rotateY((float) java.lang.Math.toRadians(entry.initialYaw()))
                             .translate(-0.5f, -0.5f, -0.5f);
-                    transform.set(viewProjection).mul(model);
-                    DistantShaders.uploadTransform(transform);
-                    glUniform2f(4,
-                            (DistantLightSampler.block(track.lightPacked) * 16 + 8) / 256.0f,
-                            (DistantLightSampler.sky(track.lightPacked) * 16 + 8) / 256.0f);
-                    //Net model yaw of the transform chain above (pitch omitted - low grades)
-                    DistantShaders.uploadFaceRotation(-yaw + entry.initialYaw());
-                    entry.mesh().mesh.drawModel(viewport, model, camX, camY, camZ);
-                    recordDepthDraw(entry.mesh().mesh, model);
-                    drawn++;
+                    drawState.beginCarriage(track, px, py, pz);
+                    // 车体与转向架各用实际变换剔除，车体不可见时仍可能看见独立转向架。
+                    if (viewport == null || DistantVisibility.isTransformedBoxVisible(viewport, model,
+                            camX, camY, camZ, cm.minX, cm.minY, cm.minZ, cm.maxX, cm.maxY, cm.maxZ)) {
+                        drawState.prepare();
+                        transform.set(viewProjection).mul(model);
+                        DistantShaders.uploadTransform(transform);
+                        DistantShaders.uploadFaceRotation(-yaw + entry.initialYaw());
+                        cm.drawModel(viewport, model, camX, camY, camZ);
+                        recordDepthDraw(cm, model);
+                        drawn++;
+                    }
 
-                    //Bogeys draw as captured snapshot meshes through the same shader (light uniform
-                    //is already set to the carriage's); works identically on both pipelines
+                    // 转向架使用同一车厢光照，独立判断可见性。
                     if (bogeyMeshProvider != null && !entry.bogeys().isEmpty()) {
-                        drawBogeys(track, entry, t, camX, camY, camZ, viewport, viewProjection, transform, model);
+                        drawBogeys(track, entry, t, camX, camY, camZ, viewport, viewProjection, transform, model, drawState);
                     }
                 }
             }
 
-            if (renderStateActive) {
+        } finally {
+            if (drawState.active) {
                 glBindVertexArray(0);
                 glUseProgram(0);
-            }
-        } finally {
-            if (renderStateActive) {
                 //Pipeline contract state (set by initDepthStencil, expected by every later pass)
                 glStencilFunc(GL_EQUAL, 1, 0x1);
                 glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
@@ -229,6 +205,14 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
     @SubscribeEvent
     public void onLogout(ClientPlayerNetworkEvent.LoggingOut event) {
         DistantTrainManager.clearAll();
+        this.onResourceReload();
+    }
+
+    @Override
+    public void onResourceReload() {
+        DistantTrainManager.onResourceReload();
+        if (bogeyMeshResetter != null) bogeyMeshResetter.run();
+        bogeyMeshGeneration++;
         beginDepthFrame(null);
     }
 
@@ -236,12 +220,12 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
     //the -1.5078125 style offset is baked into the captured mesh. Wheel spin is a P4 follow-up.
     private static void drawBogeys(DistantTrainManager.CarriageTrack track, DistantTrainManager.ShapeEntry entry,
                                    float t, double camX, double camY, double camZ, Viewport<?> viewport, Matrix4f viewProjection,
-                                   Matrix4f transform, Matrix4f model) {
+                                   Matrix4f transform, Matrix4f model, DrawState drawState) {
         List<BogeyPose> cur = track.cur.bogeys();
         List<BogeyPose> prev = track.prev != null ? track.prev.bogeys() : cur;
         int count = java.lang.Math.min(cur.size(), entry.bogeys().size());
         for (int i = 0; i < count; i++) {
-            var mesh = bogeyMeshProvider.apply(entry.bogeys().get(i));
+            var mesh = entry.bogeyMesh(i);
             if (mesh == null) {
                 continue;
             }
@@ -261,11 +245,67 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
             if (c.upsideDown()) {
                 model.rotateZ((float) java.lang.Math.PI);
             }
+            if (viewport != null && !DistantVisibility.isTransformedBoxVisible(viewport, model,
+                    camX, camY, camZ, mesh.minX, mesh.minY, mesh.minZ, mesh.maxX, mesh.maxY, mesh.maxZ)) {
+                continue;
+            }
+            drawState.prepare();
             transform.set(viewProjection).mul(model);
             DistantShaders.uploadTransform(transform);
             DistantShaders.uploadFaceRotation(yaw);
             mesh.drawModel(viewport, model, camX, camY, camZ);
             recordDepthDraw(mesh, model);
+        }
+    }
+
+    private static final class DrawState {
+        private final AbstractRenderPipeline pipeline;
+        private final net.minecraft.client.multiplayer.ClientLevel level;
+        private final int depthFunc;
+        private final long nowMs;
+        private DistantTrainManager.CarriageTrack track;
+        private double x, y, z;
+        private boolean lightReady;
+        private boolean active;
+
+        DrawState(AbstractRenderPipeline pipeline, net.minecraft.client.multiplayer.ClientLevel level, int depthFunc, long nowMs) {
+            this.pipeline = pipeline;
+            this.level = level;
+            this.depthFunc = depthFunc;
+            this.nowMs = nowMs;
+        }
+
+        void beginCarriage(DistantTrainManager.CarriageTrack track, double x, double y, double z) {
+            this.track = track;
+            this.x = x; this.y = y; this.z = z;
+            this.lightReady = false;
+        }
+
+        void prepare() {
+            // 仅有可见几何时绑定管线、采样光照；同车厢的转向架复用光照上传。
+            if (!this.active) {
+                DistantShaders.forPipeline(this.pipeline, true).bind();
+                DistantShaders.bindTextures();
+                glEnable(GL_DEPTH_TEST);
+                glDepthFunc(this.depthFunc);
+                glDepthMask(true);
+                glDisable(GL_CULL_FACE);
+                glEnable(GL_STENCIL_TEST);
+                glStencilFunc(GL_ALWAYS, 2, 0xFF);
+                glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+                this.active = true;
+            }
+            if (!this.lightReady) {
+                if (this.track.lightPacked < 0 || this.nowMs - this.track.lightSampledAtMs > 1000) {
+                    this.track.lightPacked = DistantLightSampler.samplePeek(this.level,
+                            (int) java.lang.Math.floor(this.x), (int) java.lang.Math.floor(this.y), (int) java.lang.Math.floor(this.z));
+                    this.track.lightSampledAtMs = this.nowMs;
+                }
+                glUniform2f(4,
+                        (DistantLightSampler.block(this.track.lightPacked) * 16 + 8) / 256.0f,
+                        (DistantLightSampler.sky(this.track.lightPacked) * 16 + 8) / 256.0f);
+                this.lightReady = true;
+            }
         }
     }
 

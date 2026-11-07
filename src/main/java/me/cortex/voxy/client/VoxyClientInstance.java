@@ -23,16 +23,34 @@ public class VoxyClientInstance extends VoxyInstance {
 
     private final Config config;
     private final Path basePath;
+    private record Bootstrap(Path path, Config config) {}
 
     public VoxyClientInstance() {
+        this(prepare());
+    }
+
+    private VoxyClientInstance(Bootstrap bootstrap) {
         super();
-        this.basePath = getBasePath().normalize();
-        this.config = StorageConfigUtil.getCreateStorageConfig(
+        this.basePath = bootstrap.path();
+        this.config = bootstrap.config();
+        try {
+            this.updateDedicatedThreads();
+        } catch (RuntimeException | Error failure) {
+            super.shutdown();
+            throw failure;
+        }
+    }
+
+    private static Bootstrap prepare() {
+        // 路径和配置失败时，尚未启动线程或服务。
+        Path path = getBasePath().normalize();
+        Config config = StorageConfigUtil.getCreateStorageConfig(
                 Config.class,
                 c -> c.version == 1 && c.sectionStorageConfig != null,
                 () -> DEFAULT_STORAGE_CONFIG,
-                this.basePath);
-        this.updateDedicatedThreads();
+                path);
+        if (config.disabled) throw new me.cortex.voxy.commonImpl.DontCreateInstance();
+        return new Bootstrap(path, config);
     }
 
     @Override

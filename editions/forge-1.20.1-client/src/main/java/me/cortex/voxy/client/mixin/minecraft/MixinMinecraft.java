@@ -9,12 +9,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(Minecraft.class)
 public class MixinMinecraft {
-    @Inject(method = "disconnect", at = @At("TAIL"), require = 0)
-    private void voxy$injectDisconnect(CallbackInfo ci) {
-        voxy$closeSession();
-    }
-
-    @Inject(method = "clearLevel", at = @At("TAIL"), require = 0)
+    // 暂停菜单直接调用带 Screen 的重载，不能只挂无参入口。
+    @Inject(method = "clearLevel(Lnet/minecraft/client/gui/screens/Screen;)V", at = @At("TAIL"))
     private void voxy$injectClearLevel(CallbackInfo ci) {
         voxy$closeSession();
     }

@@ -6,6 +6,7 @@ import me.cortex.voxy.common.thread.ServiceManager;
 import me.cortex.voxy.common.thread.UnifiedServiceThreadPool;
 import me.cortex.voxy.common.util.MemoryBuffer;
 import me.cortex.voxy.common.world.WorldEngine;
+import me.cortex.voxy.common.world.SurfaceMigrationService;
 import me.cortex.voxy.common.world.service.SectionSavingService;
 import me.cortex.voxy.common.world.service.VoxelIngestService;
 
@@ -26,6 +27,7 @@ public abstract class VoxyInstance {
     protected final UnifiedServiceThreadPool threadPool;
     protected final SectionSavingService savingService;
     protected final VoxelIngestService ingestService;
+    private final SurfaceMigrationService surfaceMigrationService;
 
     private final StampedLock activeWorldLock = new StampedLock();
     private final HashMap<WorldIdentifier, WorldEngine> activeWorlds = new HashMap<>();
@@ -37,6 +39,7 @@ public abstract class VoxyInstance {
         this.threadPool = new UnifiedServiceThreadPool();
         this.savingService = new SectionSavingService(this.getServiceManager());
         this.ingestService = new VoxelIngestService(this.getServiceManager());
+        this.surfaceMigrationService = new SurfaceMigrationService(this.getServiceManager());
         this.importManager = this.createImportManager();
         this.savingServiceRateLimiter = () -> this.savingService.getTaskCount() < 1200;
         this.worldCleaner = this.createWorldCleaner();
@@ -88,6 +91,10 @@ public abstract class VoxyInstance {
 
     public VoxelIngestService getIngestService() {
         return this.ingestService;
+    }
+
+    public SurfaceMigrationService getSurfaceMigrationService() {
+        return this.surfaceMigrationService;
     }
 
     public ImportManager getImportManager() {
@@ -190,13 +197,16 @@ public abstract class VoxyInstance {
 
     public void cleanIdle() {
         List<WorldIdentifier> idleWorlds = null;
+        List<WorldEngine> retryWorlds = null;
         long readStamp = this.activeWorldLock.readLock();
         try {
             for (var entry : this.activeWorlds.entrySet()) {
+                if (entry.getValue().hasPendingSaveRetries()) {
+                    if (retryWorlds == null) retryWorlds = new ArrayList<>();
+                    retryWorlds.add(entry.getValue());
+                }
                 if (entry.getValue().isWorldIdle()) {
-                    if (idleWorlds == null) {
-                        idleWorlds = new ArrayList<>();
-                    }
+                    if (idleWorlds == null) idleWorlds = new ArrayList<>();
                     idleWorlds.add(entry.getKey());
                 }
             }
@@ -204,17 +214,17 @@ public abstract class VoxyInstance {
             this.activeWorldLock.unlockRead(readStamp);
         }
 
-        if (idleWorlds == null) {
-            return;
+        // 回调可能取得世界写锁，不能在 activeWorldLock 内重试。
+        if (retryWorlds != null) {
+            for (var world : retryWorlds) world.retryFailedSaves();
         }
+        if (idleWorlds == null) return;
 
         long writeStamp = this.activeWorldLock.writeLock();
         try {
             for (var id : idleWorlds) {
                 var world = this.activeWorlds.remove(id);
-                if (world == null) {
-                    continue;
-                }
+                if (world == null) continue;
                 if (!world.isWorldIdle()) {
                     this.activeWorlds.put(id, world);
                     continue;
@@ -245,26 +255,45 @@ public abstract class VoxyInstance {
     }
 
     private void awaitWorldQuiescence(List<WorldEngine> worlds) {
-        long nextReport = System.nanoTime() + 2_000_000_000L;
-        while (true) {
-            int busyWorlds = 0;
-            int loadedSections = 0;
-            for (var world : worlds) {
-                if (world.isLive() && world.isWorldUsed()) {
-                    busyWorlds++;
-                    loadedSections += world.getActiveSectionCount();
+        boolean interrupted = Thread.interrupted();
+        try {
+            long failureSince = 0;
+            long nextReport = System.nanoTime() + 2_000_000_000L;
+            while (true) {
+                int busyWorlds = 0;
+                int loadedSections = 0;
+                Throwable publicationFailure = null;
+                for (var world : worlds) {
+                    world.retryFailedSaves();
+                    Throwable enqueueFailure = world.getLastSaveEnqueueFailure();
+                    if (enqueueFailure != null) publicationFailure = enqueueFailure;
+                    if (world.isLive() && world.isWorldUsed()) {
+                        busyWorlds++;
+                        loadedSections += world.getActiveSectionCount();
+                    }
                 }
-            }
-            if (busyWorlds == 0) {
-                return;
-            }
+                if (busyWorlds == 0) {
+                    return;
+                }
 
-            long now = System.nanoTime();
-            if (now >= nextReport) {
-                Logger.warn("Waiting for " + busyWorlds + " Voxy world engine(s) to release; loaded sections: " + loadedSections);
-                nextReport = now + 2_000_000_000L;
+                if (!this.savingService.isLive()) this.savingService.shutdown();
+                long now = System.nanoTime();
+                Throwable failure = publicationFailure != null ? publicationFailure : this.savingService.getLastFailure();
+                if (failure == null) failureSince = 0;
+                else if (failureSince == 0) failureSince = now;
+                if (failureSince != 0 && now - failureSince >= 5_000_000_000L) {
+                    throw new IllegalStateException("Voxy saves are failing; storage remains open for retry",
+                            failure);
+                }
+                if (now >= nextReport) {
+                    Logger.warn("Waiting for " + busyWorlds + " Voxy world engine(s) to release; loaded sections: " + loadedSections);
+                    nextReport = now + 2_000_000_000L;
+                }
+                interrupted |= Thread.interrupted();
+                LockSupport.parkNanos(1_000_000L);
             }
-            LockSupport.parkNanos(1_000_000L);
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
         }
     }
 
@@ -278,9 +307,11 @@ public abstract class VoxyInstance {
         this.cancelWorldImports(worlds);
 
         // Keep the saver alive until final section releases have queued their writes.
+        shutdownService("surface migration", this.surfaceMigrationService::shutdown);
         shutdownService("ingest", this.ingestService::shutdown);
+        if (!this.savingService.isLive()) this.savingService.shutdown();
         this.awaitWorldQuiescence(worlds);
-        shutdownService("saving", this.savingService::shutdown);
+        this.savingService.shutdown();
 
         this.freeWorlds();
         shutdownService("thread pool", this.threadPool::shutdown);

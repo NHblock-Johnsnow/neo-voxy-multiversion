@@ -1,6 +1,8 @@
 package me.cortex.voxy.client.compat.domum;
 
 import me.cortex.voxy.client.compat.LodPipelineHooks;
+import me.cortex.voxy.client.compat.AuxiliaryTableLoader;
+import me.cortex.voxy.client.compat.NearbyBuckets;
 import me.cortex.voxy.client.compat.SectionHandoff;
 import me.cortex.voxy.client.compat.create.DistantLightSampler;
 import me.cortex.voxy.client.compat.create.DistantMesh;
@@ -22,7 +24,9 @@ import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import org.joml.Matrix4f;
 
-import java.util.ArrayDeque;
+import java.util.LinkedHashSet;
+import java.util.TreeSet;
+import java.util.Comparator;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -49,16 +53,23 @@ import static org.lwjgl.opengl.GL30C.glBindVertexArray;
 /** 使用 Domum 的真实烘焙模型绘制远景网格，避免六面代理模型丢失瓦片形状。 */
 public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
     private static final int MAX_BAKES_PER_TICK = 1;
-    private static final double PREFETCH_BLOCKS = 64.0;
+    private static final double PREFETCH_BLOCKS = 114.0;
     private static volatile DomumDistantRenderer active;
 
     private final ConcurrentLinkedQueue<Update> updates = new ConcurrentLinkedQueue<>();
     private final Map<Long, Entry> sections = new HashMap<>();
-    private final ArrayList<Entry> drawable = new ArrayList<>();
-    private boolean drawableDirty;
-    private final ArrayDeque<Long> bakeQueue = new ArrayDeque<>();
+    private final Map<Long, HashSet<Entry>> spatialBuckets = new HashMap<>();
+    private final ArrayList<Entry> candidates = new ArrayList<>();
+    private final HashSet<Entry> residentMeshes = new HashSet<>();
+    private boolean candidatesDirty = true;
+    private final LinkedHashSet<Long> bakeQueue = new LinkedHashSet<>();
     private final HashSet<Long> queued = new HashSet<>();
+    private final TreeSet<Entry> retries = new TreeSet<>(Comparator.<Entry>comparingLong(e -> e.retryAfterNanos)
+            .thenComparingLong(e -> e.key));
     private SectionStorage storage;
+    private AuxiliaryTableLoader<int[]> baseline;
+    private final java.util.ArrayDeque<ReadRetry> readRetries = new java.util.ArrayDeque<>();
+    private final it.unimi.dsi.fastutil.longs.LongOpenHashSet retryKeys = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
     private ClientLevel level;
     private int lastScanX = Integer.MIN_VALUE;
     private int lastScanZ = Integer.MIN_VALUE;
@@ -82,50 +93,38 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
     @SubscribeEvent
     public void tick(ClientTickEvent.Post event) {
         Minecraft mc = Minecraft.getInstance();
-        if (mc.level == null) return;
+        if (mc.level == null) {
+            unbindStorage();
+            return;
+        }
         var engine = WorldIdentifier.ofEngineNullable(mc.level);
-        if (engine == null) return;
-        if (this.storage != engine.storage) {
-            clearMeshes();
-            this.updates.clear();
+        if (engine == null || !engine.isLive()) {
+            unbindStorage();
+            return;
+        }
+        if (this.storage != engine.storage || this.level != mc.level) {
+            unbindStorage();
             this.storage = engine.storage;
             this.level = mc.level;
-            this.storage.forEachAux(DomumOrnamentumCompat.DISGUISE_TABLE,
-                    (key, value) -> install(key, value, false));
+            this.baseline = new AuxiliaryTableLoader<>(engine, DomumOrnamentumCompat.DISGUISE_TABLE,
+                    (key, value) -> decode(value), pairs -> 24L + pairs.length * 4L);
         }
 
-        drainUpdates(128);
+        drainBaseline(128 - drainUpdates(this.baseline == null ? 128 : 96));
         var camera = mc.gameRenderer.getMainCamera().getPosition();
         double maxDistance = VoxyConfig.CONFIG.createRenderDistance(VoxyConfig.CONFIG.distantDomumMaxChunks);
         if (!VoxyConfig.CONFIG.distantDomum) return;
         double prepareDistance = maxDistance + PREFETCH_BLOCKS;
         double maxDistanceSq = prepareDistance * prepareDistance;
-        int cx = ((int) Math.floor(camera.x)) >> 4;
-        int cy = ((int) Math.floor(camera.y)) >> 4;
-        int cz = ((int) Math.floor(camera.z)) >> 4;
-        if (this.lastScanX == Integer.MIN_VALUE || Math.abs(cx - this.lastScanX) >= 4
-                || Math.abs(cy - this.lastScanY) >= 4 || Math.abs(cz - this.lastScanZ) >= 4
-                || maxDistance != this.lastScanRange) {
-            this.lastScanX = cx;
-            this.lastScanY = cy;
-            this.lastScanZ = cz;
-            this.lastScanRange = maxDistance;
-            double farSq = (maxDistance + 256.0) * (maxDistance + 256.0);
-            for (var item : this.sections.entrySet()) {
-                Entry entry = item.getValue();
-                double distanceSq = distanceSq(item.getKey(), camera.x, camera.y, camera.z);
-                if (entry.needsBake && distanceSq <= maxDistanceSq && this.queued.add(item.getKey())) {
-                    this.bakeQueue.add(item.getKey());
-                } else if (entry.mesh != null && distanceSq > farSq) {
-                    entry.mesh.free();
-                    entry.mesh = null;
-                    entry.needsBake = true;
-                    this.drawableDirty = true;
-                }
-            }
-        }
+        refreshCandidates(camera.x, camera.y, camera.z, maxDistance);
 
-        for (int baked = 0; baked < MAX_BAKES_PER_TICK && !this.bakeQueue.isEmpty();) {
+        long now = System.nanoTime();
+        int checks = 128;
+        while (checks > 0 && !this.retries.isEmpty() && now - this.retries.first().retryAfterNanos >= 0) {
+            this.bakeQueue.add(this.retries.pollFirst().key);
+            checks--;
+        }
+        for (int baked = 0; baked < MAX_BAKES_PER_TICK && checks-- > 0 && !this.bakeQueue.isEmpty();) {
             long key = this.bakeQueue.removeFirst();
             this.queued.remove(key);
             Entry entry = this.sections.get(key);
@@ -137,21 +136,38 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
                 var replacement = bake(key, entry.blocks, engine.getMapper(), mc.level);
                 if (entry.mesh != null) entry.mesh.free();
                 entry.mesh = replacement;
-                entry.needsBake = replacement == null;
-                this.drawableDirty = true;
+                entry.needsBake = false;
+                if (replacement == null) this.residentMeshes.remove(entry);
+                else this.residentMeshes.add(entry);
             } catch (Throwable error) {
+                if (this.queued.add(key)) {
+                    entry.retryAfterNanos = now + 1_000_000_000L;
+                    this.retries.add(entry);
+                }
                 Logger.error("Baking Domum Ornamentum detailed LOD mesh", error);
             }
             baked++;
         }
     }
 
+    @Override
+    public void onResourceReload() {
+        // 材质映射不变，旧模型及 UV 必须随资源一起失效。
+        this.bakeQueue.clear();
+        this.queued.clear();
+        this.retries.clear();
+        for (Entry entry : this.sections.values()) {
+            if (entry.mesh != null) entry.mesh.free();
+            entry.mesh = null;
+            entry.needsBake = true;
+        }
+        this.residentMeshes.clear();
+        this.candidatesDirty = true;
+    }
+
     @SubscribeEvent
     public void logout(ClientPlayerNetworkEvent.LoggingOut event) {
-        clearMeshes();
-        this.updates.clear();
-        this.storage = null;
-        this.level = null;
+        unbindStorage();
     }
 
     @Override
@@ -160,14 +176,7 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
                 || !VoxyConfig.CONFIG.distantDomum) return;
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null || mc.level != this.level) return;
-        if (this.drawableDirty) {
-            this.drawable.clear();
-            for (Entry entry : this.sections.values()) {
-                if (entry.mesh != null) this.drawable.add(entry);
-            }
-            this.drawableDirty = false;
-        }
-        if (this.drawable.isEmpty()) return;
+        if (this.candidates.isEmpty()) return;
         pipeline.setupAndBindOpaque(viewport);
 
         double handoffSq = SectionHandoff.distanceSquared();
@@ -176,7 +185,8 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
         boolean bound = false;
         var transform = new Matrix4f();
         try {
-            for (Entry entry : this.drawable) {
+            for (Entry entry : this.candidates) {
+                if (entry.mesh == null) continue;
                 long key = entry.key;
                 double ox = BlockPos.getX(key) * 16.0;
                 double oy = BlockPos.getY(key) * 16.0;
@@ -221,33 +231,95 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
         }
     }
 
-    private void drainUpdates(int limit) {
+    private int drainUpdates(int limit) {
         this.pendingUpdates.clear();
-        for (int applied = 0; applied < limit;) {
+        long now = System.nanoTime();
+        int applied = 0;
+        // 到期重读与新通知共用额度；失败的同 key 通知合并，避免每 tick 重试 IO。
+        while (applied < Math.min(32, limit) && !this.readRetries.isEmpty()
+                && now - this.readRetries.peekFirst().retryAtNanos >= 0) {
+            this.pendingUpdates.add(this.readRetries.removeFirst().key);
+            applied++;
+        }
+        for (; applied < limit;) {
             Update update = this.updates.poll();
             if (update == null) break;
             applied++;
             if (update.storage != this.storage) continue;
-            this.pendingUpdates.add(update.key);
+            if (!this.retryKeys.contains(update.key)) this.pendingUpdates.add(update.key);
         }
         for (var iterator = this.pendingUpdates.iterator(); iterator.hasNext();) {
             long key = iterator.nextLong();
-            install(key, this.storage.getAux(DomumOrnamentumCompat.DISGUISE_TABLE, key), true);
+            if (this.baseline != null) this.baseline.markUpdated(key);
+            byte[] value;
+            try {
+                value = this.storage.getAux(DomumOrnamentumCompat.DISGUISE_TABLE, key);
+            } catch (RuntimeException failure) {
+                if (this.retryKeys.add(key)) Logger.error("Reading Domum LOD update", failure);
+                this.readRetries.addLast(new ReadRetry(key, System.nanoTime() + 1_000_000_000L));
+                continue;
+            }
+            this.retryKeys.remove(key);
+            install(key, value, true);
+        }
+        return applied;
+    }
+
+    private void drainBaseline(int limit) {
+        if (this.baseline == null) return;
+        this.baseline.drain(limit, (key, pairs) -> installDecoded(key, pairs, false));
+        if (this.baseline.isFinished()) {
+            this.baseline.close();
+            this.baseline = null;
         }
     }
 
+    private void unbindStorage() {
+        if (this.baseline != null) this.baseline.close();
+        this.baseline = null;
+        clearMeshes();
+        this.updates.clear();
+        this.pendingUpdates.clear();
+        this.readRetries.clear();
+        this.retryKeys.clear();
+        this.storage = null;
+        this.level = null;
+    }
+
     private void install(long key, byte[] value, boolean urgent) {
-        int[] pairs = decode(value);
+        installDecoded(key, decode(value), urgent);
+    }
+
+    private void installDecoded(long key, int[] pairs, boolean urgent) {
         Entry old = this.sections.get(key);
         if (old != null && Arrays.equals(old.blocks, pairs)) return;
         if (pairs.length == 0) {
             this.sections.remove(key);
             if (old != null && old.mesh != null) old.mesh.free();
-            this.drawableDirty = true;
+            if (old != null) this.retries.remove(old);
+            this.bakeQueue.remove(key);
+            this.queued.remove(key);
+            this.residentMeshes.remove(old);
+            if (old != null) {
+                var bucket = this.spatialBuckets.get(bucketKey(BlockPos.getX(key) >> 3, BlockPos.getZ(key) >> 3));
+                if (bucket != null) {
+                    bucket.remove(old);
+                    if (bucket.isEmpty()) this.spatialBuckets.remove(bucketKey(BlockPos.getX(key) >> 3, BlockPos.getZ(key) >> 3));
+                }
+            }
+            this.candidatesDirty = true;
             return;
         }
-        if (old == null) this.sections.put(key, new Entry(key, pairs));
-        else {
+        this.candidatesDirty = true;
+        if (old == null) {
+            Entry entry = new Entry(key, pairs);
+            this.sections.put(key, entry);
+            this.spatialBuckets.computeIfAbsent(bucketKey(BlockPos.getX(key) >> 3, BlockPos.getZ(key) >> 3),
+                    ignored -> new HashSet<>()).add(entry);
+        } else {
+            this.retries.remove(old);
+            this.bakeQueue.remove(key);
+            this.queued.remove(key);
             old.blocks = pairs;
             old.needsBake = true;
         }
@@ -287,31 +359,74 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
                 fullBlocks[local] = me.cortex.voxy.client.compat.create.DistantFaceCulling.isFullBlock(
                         mapper.getBlockStateFromBlockId(blocks[i + 1]));
             }
-            for (int i = 0; i < blocks.length; i += 2) {
-                int local = blocks[i], blockId = blocks[i + 1];
-                var plan = DomumOrnamentumCompat.getBakePlan(mapper, blockId);
-                if (plan.isEmpty() || !plan.detailedMesh()) continue;
-                int x = local & 15, z = (local >>> 4) & 15, y = (local >>> 8) & 15;
-                int wx = sx * 16 + x, wy = sy * 16 + y, wz = sz * 16 + z;
-                var state = mapper.getBlockStateFromBlockId(blockId);
-                var model = blockRenderer.getBlockModel(state);
-                int tint = 0xFFFFFF;
-                if (plan.colourState() != null) {
-                    int sampled = colors.getColor(plan.colourState(), level, new BlockPos(wx, wy, wz), 0);
-                    if (sampled != -1) tint = sampled & 0xFFFFFF;
+            try (var lightSampler = DistantLightSampler.batch(level)) {
+                for (int i = 0; i < blocks.length; i += 2) {
+                    int local = blocks[i], blockId = blocks[i + 1];
+                    var plan = DomumOrnamentumCompat.getBakePlan(mapper, blockId);
+                    if (plan.isEmpty()) throw new IllegalStateException("Domum material is not ready: " + blockId);
+                    if (!plan.detailedMesh()) continue;
+                    int x = local & 15, z = (local >>> 4) & 15, y = (local >>> 8) & 15;
+                    int wx = sx * 16 + x, wy = sy * 16 + y, wz = sz * 16 + z;
+                    var state = mapper.getBlockStateFromBlockId(blockId);
+                    var model = blockRenderer.getBlockModel(state);
+                    int tint = 0xFFFFFF;
+                    if (plan.colourState() != null) {
+                        int sampled = colors.getColor(plan.colourState(), level, new BlockPos(wx, wy, wz), 0);
+                        if (sampled != -1) tint = sampled & 0xFFFFFF;
+                    }
+                    int light = lightSampler.sample(wx, wy, wz);
+                    builder.blockModel(state, model, x, y, z,
+                            DistantLightSampler.sky(light), DistantLightSampler.block(light),
+                            direction -> me.cortex.voxy.client.compat.create.DistantFaceCulling
+                                    .hidesSectionFace(fullBlocks, local, direction),
+                            tint, plan.modelData());
                 }
-                int light = DistantLightSampler.sample(level, wx, wy, wz);
-                builder.blockModel(state, model, x, y, z,
-                        DistantLightSampler.sky(light), DistantLightSampler.block(light),
-                        direction -> me.cortex.voxy.client.compat.create.DistantFaceCulling
-                                .hidesSectionFace(fullBlocks, local, direction),
-                        tint, plan.modelData());
             }
             return builder.build();
         } catch (RuntimeException | Error t) {
             builder.discard();
             throw t;
         }
+    }
+
+    private void refreshCandidates(double cameraX, double cameraY, double cameraZ, double maxDistance) {
+        int cx = ((int) Math.floor(cameraX)) >> 4;
+        int cy = ((int) Math.floor(cameraY)) >> 4;
+        int cz = ((int) Math.floor(cameraZ)) >> 4;
+        if (!this.candidatesDirty && this.lastScanRange == maxDistance
+                && Math.abs(cx - this.lastScanX) < 4 && Math.abs(cy - this.lastScanY) < 4
+                && Math.abs(cz - this.lastScanZ) < 4) return;
+        this.candidates.clear();
+        double prepareDistance = maxDistance + PREFETCH_BLOCKS;
+        double prepareSq = prepareDistance * prepareDistance;
+        int bx = cx >> 3, bz = cz >> 3;
+        int radius = (int) Math.ceil(prepareDistance / 128.0) + 1;
+        NearbyBuckets.forEach(this.spatialBuckets, bx, bz, radius, bucket -> {
+            for (Entry entry : bucket) {
+                if (distanceSq(entry.key, cameraX, cameraY, cameraZ) > prepareSq) continue;
+                this.candidates.add(entry);
+                if (entry.needsBake && this.queued.add(entry.key)) this.bakeQueue.add(entry.key);
+            }
+        });
+        double farSq = (maxDistance + 256.0) * (maxDistance + 256.0);
+        for (var iterator = this.residentMeshes.iterator(); iterator.hasNext();) {
+            Entry entry = iterator.next();
+            if (distanceSq(entry.key, cameraX, cameraY, cameraZ) > farSq) {
+                entry.mesh.free();
+                entry.mesh = null;
+                entry.needsBake = true;
+                iterator.remove();
+            }
+        }
+        this.lastScanX = cx;
+        this.lastScanY = cy;
+        this.lastScanZ = cz;
+        this.lastScanRange = maxDistance;
+        this.candidatesDirty = false;
+    }
+
+    private static long bucketKey(int x, int z) {
+        return ((long) x << 32) ^ (z & 0xFFFFFFFFL);
     }
 
     private static double distanceSq(long key, double x, double y, double z) {
@@ -324,15 +439,19 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
     private void clearMeshes() {
         for (Entry entry : this.sections.values()) if (entry.mesh != null) entry.mesh.free();
         this.sections.clear();
-        this.drawable.clear();
-        this.drawableDirty = false;
+        this.spatialBuckets.clear();
+        this.candidates.clear();
+        this.residentMeshes.clear();
+        this.candidatesDirty = true;
         this.bakeQueue.clear();
         this.queued.clear();
+        this.retries.clear();
         this.lastScanX = this.lastScanY = this.lastScanZ = Integer.MIN_VALUE;
         this.lastScanRange = -1;
         this.pendingUpdates.clear();
     }
 
+    private record ReadRetry(long key, long retryAtNanos) {}
     private record Update(SectionStorage storage, long key) {}
 
     private static final class Entry {
@@ -340,6 +459,7 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
         int[] blocks;
         boolean needsBake = true;
         DistantMesh mesh;
+        long retryAfterNanos;
 
         Entry(long key, int[] blocks) {
             this.key = key;

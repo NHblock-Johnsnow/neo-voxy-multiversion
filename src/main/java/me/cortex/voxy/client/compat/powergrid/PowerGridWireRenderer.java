@@ -83,11 +83,14 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
         }
     }
 
-    private static final class Entry {
+    private static final class Entry implements Runnable {
         Source source;
         DistantMesh mesh;
         long signature;
         long lastSavedMs;
+        boolean savePending;
+        volatile boolean lightDirty;
+        long lightRebuildAfterNanos;
 
         Entry(Source source) {
             this.source = source;
@@ -97,6 +100,11 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
         void close() {
             if (mesh != null) mesh.free();
             mesh = null;
+        }
+
+        @Override
+        public void run() {
+            this.lightDirty = true;
         }
     }
 
@@ -130,14 +138,21 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
         if (mc.level == null || !VoxyConfig.CONFIG.distantPowerGridWires) return;
         ensureDimension(mc.level);
         if ((++tick & 1) != 0) return;
-        for (Entity entity : live.values().toArray(Entity[]::new)) {
-            if (entity.isRemoved()) live.remove(entity.getUUID());
+        for (var iterator = live.values().iterator(); iterator.hasNext();) {
+            Entity entity = iterator.next();
+            if (entity.isRemoved()) iterator.remove();
             else capture(mc.level, entity, false);
         }
         int baked = 0;
+        long nowNanos = System.nanoTime();
         for (Entry entry : wires.values()) {
+            if (entry.lightDirty && nowNanos - entry.lightRebuildAfterNanos >= 0) {
+                entry.lightDirty = false;
+                entry.close();
+            }
             if (entry.mesh == null) {
-                entry.mesh = bake(mc.level, entry.source);
+                entry.mesh = bake(mc.level, entry.source, entry);
+                entry.lightRebuildAfterNanos = nowNanos + 500_000_000L;
                 if (++baked >= 16) break;
             }
         }
@@ -170,6 +185,7 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
     }
 
     private void capture(ClientLevel level, Entity entity, boolean forceSave) {
+        if (this.reflectionError) return;
         try {
             Reflection reflection = reflections.computeIfAbsent(entity.getClass(), type -> {
                 try {
@@ -183,7 +199,6 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
             UUID id = entity.getUUID();
             Entry entry = wires.get(id);
             long signature = source.signature();
-            boolean changed = false;
             if (entry == null) {
                 entry = new Entry(source);
                 wires.put(id, entry);
@@ -192,11 +207,11 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
                 entry.close();
                 entry.source = source;
                 entry.signature = signature;
-                changed = true;
+                entry.savePending = true;
             }
             long now = System.currentTimeMillis();
-            if (forceSave || (changed && now - entry.lastSavedMs >= SAVE_INTERVAL_MS)) {
-                PowerGridWireStore.save(storageFor(level), id, source);
+            if (forceSave || (entry.savePending && now - entry.lastSavedMs >= SAVE_INTERVAL_MS)) {
+                entry.savePending = !PowerGridWireStore.save(storageFor(level), id, source);
                 entry.lastSavedMs = now;
             }
         } catch (Throwable t) {
@@ -204,7 +219,6 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
                 reflectionError = true;
                 Logger.error("PowerGrid wire LOD API mismatch; compatibility disabled for this session", t);
             }
-            live.clear();
         }
     }
 
@@ -257,7 +271,7 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
         }
     }
 
-    private static DistantMesh bake(ClientLevel level, Source s) {
+    private static DistantMesh bake(ClientLevel level, Source s, Runnable onWarm) {
         var builder = new DistantMeshBuilder(false);
         try {
             var sprite = Minecraft.getInstance().getBlockRenderer().getBlockModel(Blocks.WHITE_CONCRETE.defaultBlockState())
@@ -273,7 +287,7 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
                     if (previous.distanceToSqr(next) < 1.0e-10) continue;
                     Vec3 worldMid = previous.add(next).scale(0.5).add(ox, oy, oz);
                     int light = DistantLightSampler.samplePeek(level, (int) Math.floor(worldMid.x),
-                            (int) Math.floor(worldMid.y), (int) Math.floor(worldMid.z));
+                            (int) Math.floor(worldMid.y), (int) Math.floor(worldMid.z), onWarm);
                     emitPrism(builder, previous, next, Math.max(0.0225f, s.thickness), u, v,
                             DistantLightSampler.sky(light), DistantLightSampler.block(light), s.color);
                 }
@@ -288,7 +302,7 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
                 Vec3 next = point(curve, i, segments, hx, hz, horizontal);
                 Vec3 worldMid = previous.add(next).scale(0.5).add(ox, oy, oz);
                 int light = DistantLightSampler.samplePeek(level, (int) Math.floor(worldMid.x),
-                        (int) Math.floor(worldMid.y), (int) Math.floor(worldMid.z));
+                        (int) Math.floor(worldMid.y), (int) Math.floor(worldMid.z), onWarm);
                 emitPrism(builder, previous, next, Math.max(0.0225f, s.thickness), u, v,
                         DistantLightSampler.sky(light), DistantLightSampler.block(light), s.color);
                 previous = next;
@@ -352,6 +366,11 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
     private static me.cortex.voxy.common.config.section.SectionStorage storageFor(ClientLevel level) {
         var engine = me.cortex.voxy.commonImpl.WorldIdentifier.ofEngineNullable(level);
         return engine == null ? null : engine.storage;
+    }
+
+    @Override
+    public void onResourceReload() {
+        this.clearMeshes();
     }
 
     private void clearMeshes() {

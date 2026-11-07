@@ -31,26 +31,47 @@ public final class DistantMesh {
     public DistantMesh(ByteBuffer data, int quads) {
         this.quads = quads;
         ensureIndices(quads);
-        this.vbo = glCreateBuffers();
-        glNamedBufferData(this.vbo, data, GL_STATIC_DRAW);
-        this.vao = glCreateVertexArrays();
-        glVertexArrayVertexBuffer(this.vao, 0, this.vbo, 0, STRIDE);
-        glVertexArrayElementBuffer(this.vao, indexBuffer);
-        glEnableVertexArrayAttrib(this.vao, 0);
-        glVertexArrayAttribFormat(this.vao, 0, 3, GL_FLOAT, false, 0);
-        glVertexArrayAttribBinding(this.vao, 0, 0);
-        glEnableVertexArrayAttrib(this.vao, 1);
-        glVertexArrayAttribFormat(this.vao, 1, 2, GL_FLOAT, false, 12);
-        glVertexArrayAttribBinding(this.vao, 1, 0);
-        glEnableVertexArrayAttrib(this.vao, 2);
-        glVertexArrayAttribFormat(this.vao, 2, 2, GL_UNSIGNED_BYTE, true, 20);
-        glVertexArrayAttribBinding(this.vao, 2, 0);
-        glEnableVertexArrayAttrib(this.vao, 3);
-        glVertexArrayAttribFormat(this.vao, 3, 4, GL_UNSIGNED_BYTE, true, 22);
-        glVertexArrayAttribBinding(this.vao, 3, 0);
-        glEnableVertexArrayAttrib(this.vao, 4);
-        glVertexArrayAttribIFormat(this.vao, 4, 1, GL_UNSIGNED_BYTE, 26);
-        glVertexArrayAttribBinding(this.vao, 4, 0);
+        int vbo = 0;
+        int vao = 0;
+        try {
+            vbo = glCreateBuffers();
+            if (vbo == 0) throw new IllegalStateException("Creating distant mesh buffer");
+            glNamedBufferData(vbo, data, GL_STATIC_DRAW);
+            vao = glCreateVertexArrays();
+            if (vao == 0) throw new IllegalStateException("Creating distant mesh vertex array");
+            glVertexArrayVertexBuffer(vao, 0, vbo, 0, STRIDE);
+            glVertexArrayElementBuffer(vao, indexBuffer);
+            glEnableVertexArrayAttrib(vao, 0);
+            glVertexArrayAttribFormat(vao, 0, 3, GL_FLOAT, false, 0);
+            glVertexArrayAttribBinding(vao, 0, 0);
+            glEnableVertexArrayAttrib(vao, 1);
+            glVertexArrayAttribFormat(vao, 1, 2, GL_FLOAT, false, 12);
+            glVertexArrayAttribBinding(vao, 1, 0);
+            glEnableVertexArrayAttrib(vao, 2);
+            glVertexArrayAttribFormat(vao, 2, 2, GL_UNSIGNED_BYTE, true, 20);
+            glVertexArrayAttribBinding(vao, 2, 0);
+            glEnableVertexArrayAttrib(vao, 3);
+            glVertexArrayAttribFormat(vao, 3, 4, GL_UNSIGNED_BYTE, true, 22);
+            glVertexArrayAttribBinding(vao, 3, 0);
+            glEnableVertexArrayAttrib(vao, 4);
+            glVertexArrayAttribIFormat(vao, 4, 1, GL_UNSIGNED_BYTE, 26);
+            glVertexArrayAttribBinding(vao, 4, 0);
+        } catch (Throwable failure) {
+            // 构造未完成时仍归还已创建对象，清理异常不能遮住原始失败。
+            try {
+                if (vao != 0) glDeleteVertexArrays(vao);
+            } catch (Throwable cleanup) {
+                if (cleanup != failure) failure.addSuppressed(cleanup);
+            }
+            try {
+                if (vbo != 0) glDeleteBuffers(vbo);
+            } catch (Throwable cleanup) {
+                if (cleanup != failure) failure.addSuppressed(cleanup);
+            }
+            throw failure;
+        }
+        this.vbo = vbo;
+        this.vao = vao;
     }
 
     public static DistantMesh fromBytes(byte[] bytes) {
@@ -73,9 +94,22 @@ public final class DistantMesh {
             indices[i] = v; indices[i + 1] = v + 1; indices[i + 2] = v + 2;
             indices[i + 3] = v + 2; indices[i + 4] = v + 3; indices[i + 5] = v;
         }
-        if (indexBuffer != 0) glDeleteBuffers(indexBuffer);
-        indexBuffer = glCreateBuffers();
-        glNamedBufferData(indexBuffer, indices, GL_STATIC_DRAW);
+        // 保持对象名，已建立的 VAO 才能继续引用扩容后的索引。
+        int buffer = indexBuffer == 0 ? glCreateBuffers() : indexBuffer;
+        if (buffer == 0) throw new IllegalStateException("Creating distant mesh index buffer");
+        try {
+            glNamedBufferData(buffer, indices, GL_STATIC_DRAW);
+        } catch (Throwable failure) {
+            if (indexBuffer == 0) {
+                try {
+                    glDeleteBuffers(buffer);
+                } catch (Throwable cleanup) {
+                    if (cleanup != failure) failure.addSuppressed(cleanup);
+                }
+            }
+            throw failure;
+        }
+        indexBuffer = buffer;
         indexCapacity = capacity;
     }
 
@@ -238,6 +272,10 @@ public final class DistantMesh {
         }
 
         private Built finish(boolean keepData) {
+            if ((this.vertices & 3) != 0) {
+                this.discard();
+                throw new IllegalStateException("Incomplete distant mesh quad: " + this.vertices + " vertices");
+            }
             int quads = this.vertices / 4;
             if (quads == 0) {
                 MemoryUtil.memFree(this.data);

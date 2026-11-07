@@ -31,6 +31,7 @@ public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
 
     @Inject(method = "allChanged()V", at = @At("RETURN"))
     private void voxy$reloadVoxyRenderer(CallbackInfo ci) {
+        me.cortex.voxy.client.compat.LodPipelineHooks.onResourceReload();
         this.voxy$shutdownRenderer();
         if (this.level != null) {
             this.voxy$createRenderer();

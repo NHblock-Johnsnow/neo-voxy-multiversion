@@ -22,14 +22,30 @@ public class GPUTiming {
     private float[] timings = new float[0];
     private String[] lables = new String[0];
 
-    private boolean enabled = false;
+    private volatile boolean enabled = false;
+    private final java.util.concurrent.atomic.AtomicInteger captures = new java.util.concurrent.atomic.AtomicInteger();
+
+    public final class Capture implements AutoCloseable {
+        private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
+
+        private Capture() { captures.incrementAndGet(); }
+
+        @Override
+        public void close() {
+            if (this.closed.compareAndSet(false, true)) captures.decrementAndGet();
+        }
+    }
+
+    public Capture capture() { return new Capture(); }
+
+    public boolean isEnabled() { return this.enabled || this.captures.get() != 0; }
 
     public void marker() {
         this.marker(null);
     }
 
     public void marker(String lable) {
-        if (this.enabled) {
+        if (this.isEnabled()) {
             this.timingSet.capture(lable);
         }
     }
@@ -41,7 +57,7 @@ public class GPUTiming {
     }
 
     public String getDebug() {
-        if (!this.enabled) {
+        if (!this.isEnabled()) {
             return "";
         }
         StringBuilder str = new StringBuilder("GpuTime: [");
@@ -60,8 +76,10 @@ public class GPUTiming {
     }
 
     public void tick() {
+        long captureId = me.cortex.voxy.commonImpl.VoxyProfile.gpuCaptureId();
         this.timingSet.download((meta,data)->{
             long current = data[0];
+            boolean profile = captureId != 0 && captureId == me.cortex.voxy.commonImpl.VoxyProfile.gpuCaptureId();
 
             if (data.length-1!=this.timings.length) {
                 this.timings = new float[data.length-1];
@@ -77,12 +95,13 @@ public class GPUTiming {
                 this.lables[i-1] = meta[i-1];
                 //Raw per-pass time to the profiler, not the rolling max kept above: a window wants the
                 //average over its frames, and the rolling value never comes back down after a spike
-                me.cortex.voxy.commonImpl.VoxyProfile.recordGpuMillis(
+                if (profile) me.cortex.voxy.commonImpl.VoxyProfile.recordGpuMillis(
                         meta[i-1] == null ? ("pass" + (i-1)) : meta[i-1], time);
                 current = next;
             }
+            // 只计算已返回且至少有一段耗时的帧，排除未就绪和旧采集窗口。
+            if (profile && data.length > 1) me.cortex.voxy.commonImpl.VoxyProfile.noteGpuFrame();
         });
-        me.cortex.voxy.commonImpl.VoxyProfile.noteGpuFrame();
         this.timingSet.tick();
     }
 
@@ -123,7 +142,7 @@ public class GPUTiming {
         }
 
         public void capture(T metadata) {
-            if (this.index > this.metadata.length) {
+            if (this.index >= this.metadata.length) {
                 throw new IllegalStateException();
             }
             int slot = this.index++;

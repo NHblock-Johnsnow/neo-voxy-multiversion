@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core.rendering.hierachical;
 
+import me.cortex.voxy.common.util.ExceptionCleanup;
+
 import it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap;
 import it.unimi.dsi.fastutil.ints.IntConsumer;
 import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
@@ -59,6 +61,7 @@ public class AsyncNodeManager {
     private final Thread thread;
     public final int maxNodeCount;
     private final long geometryCapacity;
+    private boolean stopped;
     private volatile boolean running = true;
     private volatile Throwable uncaughtException;
 
@@ -312,8 +315,9 @@ public class AsyncNodeManager {
             }
         }
 
-        if (workDone == 0) {//Nothing happened, which is odd, but just return
-            //Should probably log that nothing happened, at least once
+        if (workDone == 0) {
+            // 容量不足时等待新事件，移除批次和停机会唤醒，保留未完成任务计数。
+            LockSupport.park();
             return;
         }
         //=====================
@@ -608,9 +612,8 @@ public class AsyncNodeManager {
             }
             throw new IllegalStateException("Not running");
         }
-        if (this.workCounter.getAndIncrement() == 0) {
-            LockSupport.unpark(this.thread);
-        }
+        this.workCounter.getAndIncrement();
+        LockSupport.unpark(this.thread);
     }
 
     public void submitRequestBatch(MemoryBuffer batch) {//Only called from render thread
@@ -651,9 +654,8 @@ public class AsyncNodeManager {
             state -= 1;
         }
         if (state != 0) {
-            if (this.workCounter.getAndAdd(state) == 0) {
-                LockSupport.unpark(this.thread);
-            }
+            this.workCounter.getAndAdd(state);
+            LockSupport.unpark(this.thread);
         }
         this.tlnLock.unlockWrite(stamp);
     }
@@ -668,9 +670,8 @@ public class AsyncNodeManager {
             state -= 1;
         }
         if (state != 0) {
-            if (this.workCounter.getAndAdd(state) == 0) {
-                LockSupport.unpark(this.thread);
-            }
+            this.workCounter.getAndAdd(state);
+            LockSupport.unpark(this.thread);
         }
         this.tlnLock.unlockWrite(stamp);
     }
@@ -682,64 +683,66 @@ public class AsyncNodeManager {
     }
 
     public void stop() {
-        if (!this.running) {
-            throw new IllegalStateException();
-        }
+        this.stop(() -> {});
+    }
+
+    public void stop(Runnable stopProducers) {
+        if (this.stopped) throw new IllegalStateException("Node manager already stopped");
+        this.stopped = true;
         this.running = false;
-        LockSupport.unpark(this.thread);
-        try {
-            while (this.thread.isAlive()) {
-                LockSupport.unpark(this.thread);
+        boolean interrupted = Thread.interrupted();
+        // 必须等线程实际退出；保留中断状态，但不能留下仍访问待释放资源的线程。
+        while (this.thread.isAlive()) {
+            LockSupport.unpark(this.thread);
+            try {
                 this.thread.join(1000);
+            } catch (InterruptedException failure) {
+                interrupted = true;
             }
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
         }
-
-        while (true) {
-            var buffer = this.requestBatchQueue.poll();
-            if (buffer == null) break;
-            buffer.free();
+        try {
+            var cleanup = new ExceptionCleanup(null);
+            // 先终止网格结果的生产，再清空队列，避免晚到的结果遗留。
+            cleanup.run(stopProducers);
+            for (var item = this.requestBatchQueue.poll(); item != null; item = this.requestBatchQueue.poll()) {
+                cleanup.run(item::free);
+            }
+            for (var item = this.removeBatchQueue.poll(); item != null; item = this.removeBatchQueue.poll()) {
+                cleanup.run(item::free);
+            }
+            for (var item = this.geometryUpdateQueue.poll(); item != null; item = this.geometryUpdateQueue.poll()) {
+                cleanup.run(item::free);
+            }
+            for (var item = this.childUpdateQueue.poll(); item != null; item = this.childUpdateQueue.poll()) {
+                cleanup.run(item::release);
+            }
+            {
+                var result = (SyncResults)RESULT_HANDLE.getAndSet(this, null);
+                if (result != null) {
+                    cleanup.run(result.geometryUpload::free);
+                    cleanup.run(result.scatterWriteBuffer::free);
+                }
+            }
+            {
+                var result = (SyncResults)RESULT_CACHE_1_HANDLE.getAndSet(this, null);
+                if (result != null) {
+                    cleanup.run(result.geometryUpload::free);
+                    cleanup.run(result.scatterWriteBuffer::free);
+                }
+            }
+            {
+                var result = (SyncResults)RESULT_CACHE_2_HANDLE.getAndSet(this, null);
+                if (result != null) {
+                    cleanup.run(result.geometryUpload::free);
+                    cleanup.run(result.scatterWriteBuffer::free);
+                }
+            }
+            cleanup.run(this.scatterWrite::free);
+            cleanup.run(this.multiMemcpy::free);
+            cleanup.rethrow();
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
         }
-
-        while (true) {
-            var buffer = this.removeBatchQueue.poll();
-            if (buffer == null) break;
-            buffer.free();
-        }
-
-        while (true) {
-            var buffer = this.geometryUpdateQueue.poll();
-            if (buffer == null) break;
-            buffer.free();
-        }
-
-        while (true) {
-            var section = this.childUpdateQueue.poll();
-            if (section == null) break;
-            section.release();
-        }
-
-        if (RESULT_HANDLE.get(this) != null) {
-            var result = (SyncResults)RESULT_HANDLE.getAndSet(this, null);
-            result.geometryUpload.free();
-            result.scatterWriteBuffer.free();
-        }
-
-        if (RESULT_CACHE_1_HANDLE.get(this) != null) {//Clear cache 1
-            var result = (SyncResults)RESULT_CACHE_1_HANDLE.getAndSet(this, null);
-            result.geometryUpload.free();
-            result.scatterWriteBuffer.free();
-        }
-
-        if (RESULT_CACHE_2_HANDLE.get(this) != null) {//Clear cache 2
-            var result = (SyncResults)RESULT_CACHE_2_HANDLE.getAndSet(this, null);
-            result.geometryUpload.free();
-            result.scatterWriteBuffer.free();
-        }
-
-        this.scatterWrite.free();
-        this.multiMemcpy.free();
     }
 
     public void addDebug(List<String> debug) {
@@ -752,14 +755,27 @@ public class AsyncNodeManager {
 
     public void worldEvent(WorldSection section, int flags, int neighborMask) {
         this.router.forwardEvent(section, flags);
-
-        if (neighborMask != 0) {//trigger rebuilds for neighbors
-            if ((neighborMask&0b000001)!=0) this.router.triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x, section.y-1, section.z));//-y
-            if ((neighborMask&0b000010)!=0) this.router.triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x, section.y+1, section.z));//+y
-            if ((neighborMask&0b000100)!=0) this.router.triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x-1, section.y, section.z));//-x
-            if ((neighborMask&0b001000)!=0) this.router.triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x+1, section.y, section.z));//+x
-            if ((neighborMask&0b010000)!=0) this.router.triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x, section.y, section.z-1));//-z
-            if ((neighborMask&0b100000)!=0) this.router.triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x, section.y, section.z+1));//+z
+        if ((neighborMask & 1) != 0) this.router.triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x, section.y - 1, section.z));
+        if ((neighborMask & 2) != 0) this.router.triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x, section.y + 1, section.z));
+        int radius = Math.min(7, Math.max(0, me.cortex.voxy.client.config.VoxyConfig.CONFIG.biomeBlendRadius));
+        int horizontal = me.cortex.voxy.common.world.WorldUpdater.horizontalHaloMask(neighborMask, radius);
+        for (int dz = -1; dz <= 1; dz++) {
+            if (dz != 0 && (horizontal & (dz < 0 ? 16 : 32)) == 0) continue;
+            for (int dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dz == 0) continue;
+                if (dx != 0 && (horizontal & (dx < 0 ? 4 : 8)) == 0) continue;
+                this.router.triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x + dx, section.y, section.z + dz));
+                // 派生几何越界时使用完整 halo；否则只有流体上环的真实接壤边角依赖。
+                if ((neighborMask & 1) != 0
+                        && ((neighborMask & (1 << 18)) != 0
+                            || ((dx == 0 || (neighborMask & (dx < 0 ? 4 : 8)) != 0)
+                                && (dz == 0 || (neighborMask & (dz < 0 ? 16 : 32)) != 0)))) {
+                    this.router.triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x + dx, section.y - 1, section.z + dz));
+                }
+                if ((neighborMask & (1 << 19)) != 0) {
+                    this.router.triggerRemesh(WorldEngine.getWorldSectionId(section.lvl, section.x + dx, section.y + 1, section.z + dz));
+                }
+            }
         }
     }
 

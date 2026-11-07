@@ -23,6 +23,7 @@ public final class SableClientSkyLightCache {
     private static final int MAX_CACHED_SECTIONS = 4096;
 
     private static final Map<ClientLevel, CacheState> CACHES = new WeakHashMap<>();
+    private static long revisionSequence;
     private static boolean unavailable;
 
     private SableClientSkyLightCache() {
@@ -55,13 +56,13 @@ public final class SableClientSkyLightCache {
 
                 state.skyLightSections.put(
                         SectionPos.asLong(chunkX, minSection + sectionIndex, chunkZ),
-                        new CachedSkyLight(skyLight.copy(), gameTime)
+                        new CachedSkyLight(skyLight, gameTime)
                 );
                 cachedAny = true;
             }
 
             if (cachedAny) {
-                state.revision++;
+                state.revision = ++revisionSequence;
             }
             enforceMaxSize(state);
         } catch (RuntimeException | LinkageError e) {
@@ -93,6 +94,7 @@ public final class SableClientSkyLightCache {
         long gameTime = level.getGameTime();
         if (gameTime - cached.gameTime > SKY_LIGHT_TTL_TICKS) {
             state.skyLightSections.remove(sectionKey);
+            state.revision = ++revisionSequence;
             return -1;
         }
 
@@ -132,7 +134,7 @@ public final class SableClientSkyLightCache {
             }
 
             if (removedAny) {
-                state.revision++;
+                state.revision = ++revisionSequence;
             }
             if (state.skyLightSections.isEmpty()) {
                 CACHES.remove(level);
@@ -149,10 +151,13 @@ public final class SableClientSkyLightCache {
 
     private static void enforceMaxSize(CacheState state) {
         Iterator<Long> iterator = state.skyLightSections.keySet().iterator();
+        boolean removed = false;
         while (state.skyLightSections.size() > MAX_CACHED_SECTIONS && iterator.hasNext()) {
             iterator.next();
             iterator.remove();
+            removed = true;
         }
+        if (removed) state.revision = ++revisionSequence;
     }
 
     private static final class CacheState {

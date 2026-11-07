@@ -20,10 +20,10 @@ public final class TrackLodReplacement {
     }
 
     public static void upload(Collection<BlockPos> blocks) {
-        clear();
         int capacity = 1;
         while (capacity < blocks.size() * 2) capacity <<= 1;
         var data = MemoryUtil.memCalloc(capacity * 16);
+        int replacement = 0;
         try {
             for (BlockPos p : blocks) {
                 int slot = hash(p.getX(), p.getY(), p.getZ()) & (capacity - 1);
@@ -31,10 +31,16 @@ public final class TrackLodReplacement {
                 data.putInt(slot * 16, p.getX()).putInt(slot * 16 + 4, p.getY())
                         .putInt(slot * 16 + 8, p.getZ()).putInt(slot * 16 + 12, 1);
             }
-            buffer = glCreateBuffers();
-            glNamedBufferData(buffer, data, GL_STATIC_DRAW);
+            replacement = glCreateBuffers();
+            glNamedBufferData(replacement, data, GL_STATIC_DRAW);
+            // 新网格与替换表都构建成功后才交接，失败时保留旧表。
+            int previous = buffer;
+            buffer = replacement;
+            replacement = 0;
             ready = !blocks.isEmpty();
+            if (previous != 0) glDeleteBuffers(previous);
         } finally {
+            if (replacement != 0) glDeleteBuffers(replacement);
             MemoryUtil.memFree(data);
         }
     }

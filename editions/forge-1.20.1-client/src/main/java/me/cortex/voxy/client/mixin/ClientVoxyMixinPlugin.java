@@ -40,8 +40,13 @@ public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
             mixins.add("create.MixinVisualizationManagerImpl");
             mixins.add("create.AccessorAbstractEntityVisual");
             mixins.add("create.MixinSafeBlockEntityRenderer");
+            mixins.add("create.MixinSmartBlockEntity");
             mixins.add("create.MixinContraptionEntityRenderer");
             mixins.add("create.MixinContraptionVisual");
+            mixins.add("create.MixinContraptionShapeRevision");
+            mixins.add("create.MixinContraptionBlockChange");
+            mixins.add("create.MixinCarriageShapeRevision");
+            mixins.add("create.MixinCarriageBlockChange");
         }
 
         return mixins;

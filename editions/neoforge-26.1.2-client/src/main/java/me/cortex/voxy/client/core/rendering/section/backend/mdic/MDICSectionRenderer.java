@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core.rendering.section.backend.mdic;
 
+import me.cortex.voxy.common.util.ExceptionCleanup;
+
 import java.util.List;
 import me.cortex.voxy.client.RenderStatistics;
 import me.cortex.voxy.client.VoxyClient;
@@ -45,71 +47,83 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
    private static final int STATISTICS_BUFFER_BINDING = 8;
    private final Shader terrainShader;
    private final Shader translucentTerrainShader;
-   private final Shader commandGenShader = Shader.make()
-      .define("TRANSLUCENT_WRITE_BASE", 1024)
-      .define("TEMPORAL_OFFSET", 500000)
-      .define("TRANSLUCENT_DISTANCE_BUFFER_BINDING", 7)
-      .defineIf("HAS_STATISTICS", RenderStatistics.enabled)
-      .defineIf("STATISTICS_BUFFER_BINDING", RenderStatistics.enabled, 8)
-      .add(ShaderType.COMPUTE, "voxy:lod/gl46/cmdgen.comp")
-      .compile();
-   private final Shader prepShader = Shader.make().add(ShaderType.COMPUTE, "voxy:lod/gl46/prep.comp").compile();
+   private final Shader commandGenShader;
+   private final Shader prepShader;
    private final Shader cullShader;
-   private final Shader prefixSumShader = Shader.make()
-      .add(ShaderType.COMPUTE, Capabilities.INSTANCE.subgroup ? "voxy:util/prefixsum/inital3.comp" : "voxy:util/prefixsum/simple.comp")
-      .define("IO_BUFFER", 0)
-      .compile();
-   private final Shader translucentGenShader = Shader.make()
-      .add(ShaderType.COMPUTE, "voxy:lod/gl46/buildtranslucents.comp")
-      .define("TRANSLUCENT_WRITE_BASE", 1024)
-      .define("TRANSLUCENT_DISTANCE_BUFFER_BINDING", 5)
-      .define("TRANSLUCENT_OFFSET", 400000)
-      .compile();
-   private final GlBuffer uniform = new GlBuffer(1024L).zero();
-   private final GlBuffer distanceCountBuffer = new GlBuffer(404096L).zero();
-   private final GlBuffer statisticsBuffer = new GlBuffer(1024L).zero();
+   private final Shader prefixSumShader;
+   private final Shader translucentGenShader;
+   private final GlBuffer uniform;
+   private final GlBuffer distanceCountBuffer;
+   private final GlBuffer statisticsBuffer;
    private final AbstractRenderPipeline pipeline;
    private final float fluidDatumY;
 
    public MDICSectionRenderer(AbstractRenderPipeline pipeline, ModelStore modelStore, BasicSectionGeometryData geometryData) {
       super(pipeline.properties, modelStore, geometryData);
-      this.pipeline = pipeline;
-      var level = Minecraft.getInstance().level;
-      this.fluidDatumY = level == null ? -1.0e9F : level.getSeaLevel() - 7.0F / 64.0F;
-      String vertex = ShaderLoader.parse("voxy:lod/gl46/quads3.vert");
-      String taa = pipeline.taaFunction("taaShift");
-      if (taa != null) {
-         vertex = vertex + "\n" + taa;
-      }
+        try {
+            this.commandGenShader = Shader.make()
+                    .define("TRANSLUCENT_WRITE_BASE", 1024)
+                    .define("TEMPORAL_OFFSET", 500000)
+                    .define("TRANSLUCENT_DISTANCE_BUFFER_BINDING", 7)
+                    .defineIf("HAS_STATISTICS", RenderStatistics.enabled)
+                    .defineIf("STATISTICS_BUFFER_BINDING", RenderStatistics.enabled, 8)
+                    .add(ShaderType.COMPUTE, "voxy:lod/gl46/cmdgen.comp")
+                    .compile();
+            this.prepShader = Shader.make().add(ShaderType.COMPUTE, "voxy:lod/gl46/prep.comp").compile();
+            this.prefixSumShader = Shader.make()
+                    .add(ShaderType.COMPUTE, Capabilities.INSTANCE.subgroup ? "voxy:util/prefixsum/inital3.comp" : "voxy:util/prefixsum/simple.comp")
+                    .define("IO_BUFFER", 0)
+                    .compile();
+            this.translucentGenShader = Shader.make()
+                    .add(ShaderType.COMPUTE, "voxy:lod/gl46/buildtranslucents.comp")
+                    .define("TRANSLUCENT_WRITE_BASE", 1024)
+                    .define("TRANSLUCENT_DISTANCE_BUFFER_BINDING", 5)
+                    .define("TRANSLUCENT_OFFSET", 400000)
+                    .compile();
+            this.uniform = new GlBuffer(1024L).zero();
+            this.distanceCountBuffer = new GlBuffer(404096L).zero();
+            this.statisticsBuffer = new GlBuffer(1024L).zero();
+            this.pipeline = pipeline;
+            var level = Minecraft.getInstance().level;
+            this.fluidDatumY = level == null ? -1.0e9F : level.getSeaLevel() - 7.0F / 64.0F;
+            String vertex = ShaderLoader.parse("voxy:lod/gl46/quads3.vert");
+            String taa = pipeline.taaFunction("taaShift");
+            if (taa != null) {
+               vertex = vertex + "\n" + taa;
+            }
 
-      Shader.Builder<Shader> builder = Shader.make()
-         .apply(this.properties::apply)
-         .defineIf("TAA_PATCH", taa != null)
-         .defineIf("DEBUG_RENDER", false)
-         .addSource(ShaderType.VERTEX, vertex);
-      addDirectionalFaceTint(builder, Minecraft.getInstance().level);
-      String frag = ShaderLoader.parse("voxy:lod/gl46/quads.frag");
-      String opaqueFrag = pipeline.patchOpaqueShader(this, frag);
-      opaqueFrag = opaqueFrag == null ? frag : opaqueFrag;
-      this.terrainShader = tryCompilePatchedOrNormal(builder, opaqueFrag, frag);
-      String translucentFrag = pipeline.patchTranslucentShader(this, frag);
-      translucentFrag = translucentFrag == null ? frag : translucentFrag;
-      this.translucentTerrainShader = tryCompilePatchedOrNormal(builder.define("TRANSLUCENT"), translucentFrag, frag);
-      if (this.pipeline.hasTAA()) {
-         this.cullShader = Shader.make()
-            .apply(this.properties::apply)
-            .addSource(ShaderType.VERTEX, ShaderLoader.parse("voxy:lod/gl46/cull/raster.vert") + "\n\n\n\n" + pipeline.taaFunction("getTAA"))
-            .define("TAA")
-            .add(ShaderType.FRAGMENT, "voxy:lod/gl46/cull/raster.frag")
-            .compile();
-      } else {
-         this.cullShader = Shader.make()
-            .apply(this.properties::apply)
-            .add(ShaderType.VERTEX, "voxy:lod/gl46/cull/raster.vert")
-            .add(ShaderType.FRAGMENT, "voxy:lod/gl46/cull/raster.frag")
-            .compile();
-      }
-   }
+            Shader.Builder<Shader> builder = Shader.make()
+               .apply(this.properties::apply)
+               .defineIf("TAA_PATCH", taa != null)
+               .defineIf("DEBUG_RENDER", false)
+               .addSource(ShaderType.VERTEX, vertex);
+            addDirectionalFaceTint(builder, Minecraft.getInstance().level);
+            String frag = ShaderLoader.parse("voxy:lod/gl46/quads.frag");
+            String opaqueFrag = pipeline.patchOpaqueShader(this, frag);
+            opaqueFrag = opaqueFrag == null ? frag : opaqueFrag;
+            this.terrainShader = tryCompilePatchedOrNormal(builder, opaqueFrag, frag);
+            String translucentFrag = pipeline.patchTranslucentShader(this, frag);
+            translucentFrag = translucentFrag == null ? frag : translucentFrag;
+            this.translucentTerrainShader = tryCompilePatchedOrNormal(builder.define("TRANSLUCENT"), translucentFrag, frag);
+            if (this.pipeline.hasTAA()) {
+               this.cullShader = Shader.make()
+                  .apply(this.properties::apply)
+                  .addSource(ShaderType.VERTEX, ShaderLoader.parse("voxy:lod/gl46/cull/raster.vert") + "\n\n\n\n" + pipeline.taaFunction("getTAA"))
+                  .define("TAA")
+                  .add(ShaderType.FRAGMENT, "voxy:lod/gl46/cull/raster.frag")
+                  .compile();
+            } else {
+               this.cullShader = Shader.make()
+                  .apply(this.properties::apply)
+                  .add(ShaderType.VERTEX, "voxy:lod/gl46/cull/raster.vert")
+                  .add(ShaderType.FRAGMENT, "voxy:lod/gl46/cull/raster.frag")
+                  .compile();
+            }
+        } catch (RuntimeException | Error failure) {
+            this.releaseResources(new ExceptionCleanup(failure));
+            throw failure;
+        }
+    }
 
    private void uploadUniformBuffer(MDICViewport viewport) {
       long ptr = UploadStream.INSTANCE.upload(this.uniform, 0L, 1024L);
@@ -331,15 +345,21 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
    // ---- 生命周期 ------------------------------------------------------
 
    public void free() {
-      this.uniform.free();
-      this.distanceCountBuffer.free();
-      this.translucentTerrainShader.free();
-      this.terrainShader.free();
-      this.commandGenShader.free();
-      this.cullShader.free();
-      this.prepShader.free();
-      this.translucentGenShader.free();
-      this.prefixSumShader.free();
-      this.statisticsBuffer.free();
-   }
+        var cleanup = new ExceptionCleanup(null);
+        this.releaseResources(cleanup);
+        cleanup.rethrow();
+    }
+
+    private void releaseResources(ExceptionCleanup cleanup) {
+        if (this.cullShader != null) cleanup.run(this.cullShader::free);
+        if (this.translucentTerrainShader != null) cleanup.run(this.translucentTerrainShader::free);
+        if (this.terrainShader != null) cleanup.run(this.terrainShader::free);
+        if (this.statisticsBuffer != null) cleanup.run(this.statisticsBuffer::free);
+        if (this.distanceCountBuffer != null) cleanup.run(this.distanceCountBuffer::free);
+        if (this.uniform != null) cleanup.run(this.uniform::free);
+        if (this.translucentGenShader != null) cleanup.run(this.translucentGenShader::free);
+        if (this.prefixSumShader != null) cleanup.run(this.prefixSumShader::free);
+        if (this.prepShader != null) cleanup.run(this.prepShader::free);
+        if (this.commandGenShader != null) cleanup.run(this.commandGenShader::free);
+    }
 }

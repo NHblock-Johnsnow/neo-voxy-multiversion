@@ -37,6 +37,10 @@ public final class SableParentChunkLightSync {
         final LongOpenHashSet fullSent = new LongOpenHashSet();
         //Chunks that only ever got a light packet (outside the storage ring)
         final LongOpenHashSet lightSent = new LongOpenHashSet();
+        final LongOpenHashSet pending = new LongOpenHashSet();
+        int minChunkX, maxChunkX, minChunkZ, maxChunkZ, ringRadius;
+        long ringCenter;
+        ChunkTrackingView trackingView;
         long lastRefreshGameTime;
         long nextRefreshTick;
     }
@@ -82,6 +86,7 @@ public final class SableParentChunkLightSync {
             ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
             if (container == null) {
                 STATE.remove(level);
+                DIRTY.remove(level);
                 return;
             }
 
@@ -181,41 +186,82 @@ public final class SableParentChunkLightSync {
         ChunkPos ringCenter = trackingView instanceof ChunkTrackingView.Positioned positioned
                 ? positioned.center() : player.chunkPosition();
 
+        boolean cacheableView = trackingView == ChunkTrackingView.EMPTY || trackingView instanceof ChunkTrackingView.Positioned;
+        boolean unchanged = cacheableView && trackingView.equals(state.trackingView)
+                && state.minChunkX == minChunkX && state.maxChunkX == maxChunkX
+                && state.minChunkZ == minChunkZ && state.maxChunkZ == maxChunkZ
+                && state.ringRadius == ringRadius && state.ringCenter == ringCenter.toLong();
+        if (unchanged && state.pending.isEmpty()) return;
+
         LevelLightEngine lightEngine = level.getLightEngine();
+        if (unchanged) {
+            // 足迹未变只重试尚未加载的区块，静止时不重复枚举已发送范围。
+            LongIterator pending = state.pending.iterator();
+            while (pending.hasNext()) {
+                long chunk = pending.nextLong();
+                if (syncChunk(level, player, state, trackingView, ringCenter, ringRadius, lightEngine,
+                        ChunkPos.getX(chunk), ChunkPos.getZ(chunk))) pending.remove();
+            }
+            return;
+        }
+
+        // 发送记录仅覆盖当前足迹；离开存储环的完整区块不能在回访时误判为仍被客户端持有。
+        pruneSent(state.fullSent, minChunkX, maxChunkX, minChunkZ, maxChunkZ, trackingView, ringCenter, ringRadius, true);
+        pruneSent(state.lightSent, minChunkX, maxChunkX, minChunkZ, maxChunkZ, trackingView, ringCenter, ringRadius, false);
+        state.pending.clear();
         for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
             for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
-                long chunkLong = ChunkPos.asLong(chunkX, chunkZ);
-                if (trackingView.contains(chunkX, chunkZ)) {
-                    //Vanilla owns it; when it later leaves the view the server sends ForgetLevelChunk
-                    //and the client drops chunk and light both, so it counts as never-sent again
-                    state.fullSent.remove(chunkLong);
-                    state.lightSent.remove(chunkLong);
-                    continue;
-                }
-
-                LevelChunk chunk = level.getChunkSource().getChunkNow(chunkX, chunkZ);
-                if (chunk == null) {
-                    //Not loaded yet - retried next tick, per chunk, without re-sending its neighbours
-                    continue;
-                }
-
-                boolean inRing = Math.max(Math.abs(chunkX - ringCenter.x), Math.abs(chunkZ - ringCenter.z)) <= ringRadius;
-                if (inRing) {
-                    if (!state.fullSent.contains(chunkLong)) {
-                        player.connection.send(new ClientboundLevelChunkWithLightPacket(chunk, lightEngine, null, null));
-                        state.fullSent.add(chunkLong);
-                        state.lightSent.remove(chunkLong);
-                    }
-                } else {
-                    //Ring recentered away: the client already discarded the body it once accepted
-                    state.fullSent.remove(chunkLong);
-                    if (!state.lightSent.contains(chunkLong)) {
-                        player.connection.send(new ClientboundLightUpdatePacket(new ChunkPos(chunkX, chunkZ), lightEngine, null, null));
-                        state.lightSent.add(chunkLong);
-                    }
+                if (!syncChunk(level, player, state, trackingView, ringCenter, ringRadius, lightEngine, chunkX, chunkZ)) {
+                    state.pending.add(ChunkPos.asLong(chunkX, chunkZ));
                 }
             }
         }
+        state.minChunkX = minChunkX; state.maxChunkX = maxChunkX;
+        state.minChunkZ = minChunkZ; state.maxChunkZ = maxChunkZ;
+        state.ringCenter = ringCenter.toLong();
+        state.ringRadius = ringRadius;
+        state.trackingView = trackingView;
+    }
+
+    private static void pruneSent(LongOpenHashSet sent, int minX, int maxX, int minZ, int maxZ,
+                                  ChunkTrackingView view, ChunkPos center, int radius, boolean full) {
+        LongIterator iterator = sent.iterator();
+        while (iterator.hasNext()) {
+            long chunk = iterator.nextLong();
+            int x = ChunkPos.getX(chunk), z = ChunkPos.getZ(chunk);
+            if (x < minX || x > maxX || z < minZ || z > maxZ || view.contains(x, z)
+                    || (full && Math.max(Math.abs(x - center.x), Math.abs(z - center.z)) > radius)) {
+                iterator.remove();
+            }
+        }
+    }
+
+    private static boolean syncChunk(ServerLevel level, ServerPlayer player, TrackingState state,
+                                     ChunkTrackingView view, ChunkPos center, int radius, LevelLightEngine lightEngine,
+                                     int x, int z) {
+        long chunk = ChunkPos.asLong(x, z);
+        if (view.contains(x, z)) {
+            state.fullSent.remove(chunk);
+            state.lightSent.remove(chunk);
+            return true;
+        }
+        boolean inRing = Math.max(Math.abs(x - center.x), Math.abs(z - center.z)) <= radius;
+        if (inRing && state.fullSent.contains(chunk)) return true;
+        if (!inRing) {
+            state.fullSent.remove(chunk);
+            if (state.lightSent.contains(chunk)) return true;
+        }
+        LevelChunk loaded = level.getChunkSource().getChunkNow(x, z);
+        if (loaded == null) return false;
+        if (inRing) {
+            player.connection.send(new ClientboundLevelChunkWithLightPacket(loaded, lightEngine, null, null));
+            state.fullSent.add(chunk);
+            state.lightSent.remove(chunk);
+        } else {
+            player.connection.send(new ClientboundLightUpdatePacket(new ChunkPos(x, z), lightEngine, null, null));
+            state.lightSent.add(chunk);
+        }
+        return true;
     }
 
     private static void refreshDirty(ServerLevel level, ServerPlayer player, TrackingState state,

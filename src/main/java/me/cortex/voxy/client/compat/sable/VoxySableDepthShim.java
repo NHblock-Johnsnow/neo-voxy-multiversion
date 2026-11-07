@@ -63,6 +63,8 @@ import static org.lwjgl.opengl.GL30C.GL_MAX_DRAW_BUFFERS;
 import static org.lwjgl.opengl.GL30C.GL_READ_FRAMEBUFFER;
 import static org.lwjgl.opengl.GL30C.GL_READ_FRAMEBUFFER_BINDING;
 import static org.lwjgl.opengl.GL30C.GL_RENDERBUFFER;
+import static org.lwjgl.opengl.GL30C.GL_VERTEX_ARRAY_BINDING;
+import static org.lwjgl.opengl.GL30C.glBindVertexArray;
 import static org.lwjgl.opengl.GL30C.glBindFramebuffer;
 import static org.lwjgl.opengl.GL30C.glGetIntegeri;
 import static org.lwjgl.opengl.GL33C.GL_SAMPLER_BINDING;
@@ -483,6 +485,7 @@ public final class VoxySableDepthShim {
         private final int width;
         private final int height;
         private final int currentProgram;
+        private final int vertexArray;
         private final int activeTexture;
         private final int texture0;
         private final int texture1;
@@ -512,6 +515,7 @@ public final class VoxySableDepthShim {
                 int width,
                 int height,
                 int currentProgram,
+                int vertexArray,
                 int activeTexture,
                 int texture0,
                 int texture1,
@@ -534,6 +538,7 @@ public final class VoxySableDepthShim {
             this.width = width;
             this.height = height;
             this.currentProgram = currentProgram;
+            this.vertexArray = vertexArray;
             this.activeTexture = activeTexture;
             this.texture0 = texture0;
             this.texture1 = texture1;
@@ -569,6 +574,7 @@ public final class VoxySableDepthShim {
                     viewport[2],
                     viewport[3],
                     glGetInteger(GL_CURRENT_PROGRAM),
+                    glGetInteger(GL_VERTEX_ARRAY_BINDING),
                     activeTexture,
                     texture0,
                     texture1,
@@ -627,6 +633,7 @@ public final class VoxySableDepthShim {
 
         private void restoreMutableState() {
             glUseProgram(this.currentProgram);
+            glBindVertexArray(this.vertexArray);
             glBindTextureUnit(0, this.texture0);
             glBindSampler(0, this.sampler0);
             glBindTextureUnit(1, this.texture1);

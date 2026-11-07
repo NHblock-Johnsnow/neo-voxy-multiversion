@@ -10,6 +10,10 @@ import me.cortex.voxy.compat.far.FarEntityProtocol.VehicleSnapshot;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtIo;
+import net.minecraft.network.Connection;
+import net.minecraft.network.PacketSendListener;
+import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.common.ClientboundCustomPayloadPacket;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
@@ -18,11 +22,10 @@ import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ItemStack;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
-import net.neoforged.neoforge.network.PacketDistributor;
+import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 
 import java.util.ArrayList;
 import java.io.ByteArrayOutputStream;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -34,6 +37,11 @@ public final class FarEntityService {
     private static final int UPDATE_INTERVAL_TICKS = 10;
     private static final int MAX_DISTANCE_BLOCKS = 32768;
     private final Map<UUID, ClientSettings> subscribers = new ConcurrentHashMap<>();
+    private final FarEntitySendQueue.Budget encodingBudget =
+            new FarEntitySendQueue.Budget(256 * 1024 * 1024);
+    private MinecraftServer server;
+    private int sendPlayerCursor;
+    private boolean transportPending;
     private final Map<UUID, CachedVehicleData> vehicleDataCache =
             new LinkedHashMap<>(32, 0.75F, true) {
                 @Override
@@ -45,21 +53,44 @@ public final class FarEntityService {
     private int tickCounter;
 
     public void handleHello(ServerPlayer player, Hello hello) {
+        this.bindServer(player.getServer());
         if (hello.version() != FarEntityProtocol.VERSION
                 || !player.connection.hasChannel(PlayersPayload.TYPE)) {
-            this.subscribers.remove(player.getUUID());
+            var removed = this.subscribers.remove(player.getUUID());
+            if (removed != null) removed.outgoing.close();
             return;
         }
-        this.subscribers.put(player.getUUID(), new ClientSettings(
+        var previous = this.subscribers.put(player.getUUID(), new ClientSettings(
+                player.connection.getConnection(), this.encodingBudget,
                 hello.enabled(),
                 hello.includeVehicles(),
                 Math.clamp(hello.maximumDistanceBlocks(), 64, MAX_DISTANCE_BLOCKS),
                 hello.shareSelf()
         ));
+        if (previous != null) previous.outgoing.close();
     }
 
     public void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
-        this.subscribers.remove(event.getEntity().getUUID());
+        if (event.getEntity() instanceof ServerPlayer player) {
+            var settings = this.subscribers.get(player.getUUID());
+            if (settings != null && settings.connection == player.connection.getConnection()
+                    && this.subscribers.remove(player.getUUID(), settings)) settings.outgoing.close();
+        }
+    }
+
+    public void onServerStopped(ServerStoppedEvent event) {
+        if (this.server == event.getServer()) this.bindServer(null);
+    }
+
+    private void bindServer(MinecraftServer server) {
+        if (this.server == server) return;
+        for (var settings : this.subscribers.values()) settings.outgoing.close();
+        this.subscribers.clear();
+        this.vehicleDataCache.clear();
+        this.tickCounter = 0;
+        this.sendPlayerCursor = 0;
+        this.transportPending = false;
+        this.server = server;
     }
 
     public void onServerTick(ServerTickEvent.Post event) {
@@ -67,27 +98,63 @@ public final class FarEntityService {
     }
 
     private void tick(MinecraftServer server) {
-        if (this.subscribers.isEmpty() || ++this.tickCounter < UPDATE_INTERVAL_TICKS) {
-            return;
-        }
-        this.tickCounter = 0;
+        this.bindServer(server);
+        if (this.subscribers.isEmpty()) return;
+        boolean sample = ++this.tickCounter >= UPDATE_INTERVAL_TICKS;
+        if (!sample && !this.transportPending) return;
         List<ServerPlayer> players = server.getPlayerList().getPlayers();
-        Map<UUID, PlayerSnapshot> playerOnlyCache = new HashMap<>(players.size());
-        Map<UUID, PlayerSnapshot> vehicleCache = new HashMap<>(players.size());
-        for (ServerPlayer viewer : players) {
-            ClientSettings settings = this.subscribers.get(viewer.getUUID());
-            if (settings != null && settings.enabled() && viewer.connection.hasChannel(PlayersPayload.TYPE)) {
-                this.sendSnapshot(viewer, players, settings,
-                        settings.includeVehicles() ? vehicleCache : playerOnlyCache);
+        if (sample) {
+            this.tickCounter = 0;
+            Map<UUID, PlayerSnapshot> playerOnlyCache = new HashMap<>(players.size());
+            Map<UUID, PlayerSnapshot> vehicleCache = new HashMap<>(players.size());
+            for (ServerPlayer viewer : players) {
+                ClientSettings settings = this.subscribers.get(viewer.getUUID());
+                if (settings != null && settings.connection == viewer.connection.getConnection()
+                        && settings.enabled() && viewer.connection.hasChannel(PlayersPayload.TYPE)) {
+                    this.sendSnapshot(viewer, players, settings,
+                            settings.includeVehicles() ? vehicleCache : playerOnlyCache);
+                }
             }
         }
+        if (!this.transportPending) return;
+        int visited = 0, serviced = 0;
+        boolean pending = false;
+        int cursor = players.isEmpty() ? 0 : Math.floorMod(this.sendPlayerCursor, players.size());
+        // 每 tick 全服至多八份玩家额度，采样仍保持原十 tick 间隔。
+        while (visited < players.size() && serviced < 8) {
+            var viewer = players.get(cursor);
+            cursor = (cursor + 1) % players.size();
+            visited++;
+            var settings = this.subscribers.get(viewer.getUUID());
+            if (settings == null || !settings.outgoing.pending()) continue;
+            serviced++;
+            var connection = viewer.connection.getConnection();
+            settings.outgoing.drain(viewer.connection.hasChannel(FarEntityPackets.FragmentPayload.TYPE),
+                    () -> this.server == server && this.subscribers.get(viewer.getUUID()) == settings
+                            && settings.connection == connection && viewer.connection.getConnection() == connection
+                            && server.getPlayerList().getPlayer(viewer.getUUID()) == viewer && connection.isConnected(),
+                    () -> connection.channel() != null && connection.channel().isWritable(),
+                    (packet, completed) -> viewer.connection.send(new ClientboundCustomPayloadPacket(packet),
+                            new PacketSendListener() {
+                                @Override
+                                public void onSuccess() { completed.accept(true); }
+
+                                @Override
+                                public Packet<?> onFailure() { completed.accept(false); return null; }
+                            }),
+                    settings.delivery::prepare, System.nanoTime());
+            pending |= settings.outgoing.pending();
+        }
+        this.sendPlayerCursor = cursor;
+        this.transportPending = pending || visited < players.size();
     }
 
     private void sendSnapshot(ServerPlayer viewer, List<ServerPlayer> onlinePlayers, ClientSettings settings,
                               Map<UUID, PlayerSnapshot> snapshotCache) {
         int maximumDistance = settings.maximumDistanceBlocks();
         double maximumDistanceSquared = (double) maximumDistance * maximumDistance;
-        List<PlayerSnapshot> snapshots = new ArrayList<>(Math.max(0, onlinePlayers.size() - 1));
+        List<PlayerSnapshot> snapshots = new ArrayList<>(Math.min(FarEntityProtocol.MAX_PLAYERS_PER_PACKET,
+                Math.max(0, onlinePlayers.size() - 1)));
         for (ServerPlayer target : onlinePlayers) {
             if (target == viewer || target.level() != viewer.level()) {
                 continue;
@@ -108,14 +175,16 @@ public final class FarEntityService {
                 snapshot = snapshot(target, settings.includeVehicles());
                 snapshotCache.put(target.getUUID(), snapshot);
             }
-            snapshots.add(settings.prepare(target.getUUID(), snapshot));
+            snapshots.add(snapshot);
+            if (snapshots.size() == FarEntityProtocol.MAX_PLAYERS_PER_PACKET) break;
         }
 
         PlayerBatch batch = new PlayerBatch(
                 viewer.level().dimension().location().toString(),
                 snapshots
         );
-        PacketDistributor.sendToPlayer(viewer, new PlayersPayload(batch));
+        settings.outgoing.submit(batch);
+        this.transportPending = true;
     }
 
     private PlayerSnapshot snapshot(ServerPlayer target, boolean includeVehicle) {
@@ -201,14 +270,19 @@ public final class FarEntityService {
     }
 
     private static final class ClientSettings {
+        private final Connection connection;
+        private final FarEntitySendQueue outgoing;
+        private final FarEntityDelivery delivery = new FarEntityDelivery();
         private final boolean enabled;
         private final boolean includeVehicles;
         private final int maximumDistanceBlocks;
         private final boolean shareSelf;
-        private final Map<UUID, DeliveredVehicleData> deliveredVehicleData = new HashMap<>();
 
-        private ClientSettings(boolean enabled, boolean includeVehicles,
+        private ClientSettings(Connection connection, FarEntitySendQueue.Budget budget,
+                               boolean enabled, boolean includeVehicles,
                                int maximumDistanceBlocks, boolean shareSelf) {
+            this.connection = connection;
+            this.outgoing = new FarEntitySendQueue(budget);
             this.enabled = enabled;
             this.includeVehicles = includeVehicles;
             this.maximumDistanceBlocks = maximumDistanceBlocks;
@@ -220,22 +294,6 @@ public final class FarEntityService {
         int maximumDistanceBlocks() { return this.maximumDistanceBlocks; }
         boolean shareSelf() { return this.shareSelf; }
 
-        PlayerSnapshot prepare(UUID playerUuid, PlayerSnapshot snapshot) {
-            VehicleSnapshot vehicle = snapshot.vehicle();
-            if (vehicle == null) {
-                this.deliveredVehicleData.remove(playerUuid);
-                return snapshot;
-            }
-            DeliveredVehicleData delivered = new DeliveredVehicleData(
-                    vehicle.uuid(), vehicle.entityTypeId(), Arrays.hashCode(vehicle.renderData()));
-            DeliveredVehicleData previous = this.deliveredVehicleData.put(playerUuid, delivered);
-            return delivered.equals(previous)
-                    ? snapshot.withVehicle(vehicle.withoutRenderData())
-                    : snapshot;
-        }
-    }
-
-    private record DeliveredVehicleData(UUID uuid, String typeId, int renderDataHash) {
     }
 
     private record CachedVehicleData(String typeId, byte[] data, long refreshAfter) {

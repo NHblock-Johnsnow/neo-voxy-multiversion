@@ -52,6 +52,11 @@ public final class DistantKineticRenderer implements LodPipelineHooks.Renderer {
     }
 
     @Override
+    public void onResourceReload() {
+        KineticSnapshots.onResourceReload();
+    }
+
+    @Override
     public void render(me.cortex.voxy.client.core.AbstractRenderPipeline pipeline, Viewport<?> viewport, int depthFunc) {
         pipeline.setupAndBindOpaque(viewport);
         this.renderCommon(pipeline, viewport, viewport.MVP, viewport.cameraX, viewport.cameraY, viewport.cameraZ, depthFunc);
@@ -84,7 +89,8 @@ public final class DistantKineticRenderer implements LodPipelineHooks.Renderer {
         try {
             for (var entry : sections.long2ObjectEntrySet()) {
                 var bucket = entry.getValue();
-                if (bucket.mesh == null) {
+                var mesh = bucket.mesh;
+                if (mesh == null) {
                     continue;
                 }
                 long key = entry.getLongKey();
@@ -94,10 +100,10 @@ public final class DistantKineticRenderer implements LodPipelineHooks.Renderer {
                 if (distSq < reachSq || distSq > maxDistSq) {
                     continue;
                 }
-                //Before any state setup, so a frame looking away from every machine never binds the
-                //shader at all. Snapshots are captured per 16-block section, hence the cube.
+                // 链条可伸出来源区段；先按完整网格剔除，再绑定渲染状态。
                 if (viewport != null && !DistantVisibility.isBoxVisible(viewport,
-                        ox, oy, oz, ox + 16, oy + 16, oz + 16)) {
+                        ox + mesh.minX, oy + mesh.minY, oz + mesh.minZ,
+                        ox + mesh.maxX, oy + mesh.maxY, oz + mesh.maxZ)) {
                     continue;
                 }
 
@@ -120,7 +126,7 @@ public final class DistantKineticRenderer implements LodPipelineHooks.Renderer {
 
                 transform.set(viewProjection).translate((float) (ox - camX), (float) (oy - camY), (float) (oz - camZ));
                 DistantShaders.uploadTransform(transform);
-                bucket.mesh.drawAt(viewport, ox, oy, oz);
+                mesh.drawAt(viewport, ox, oy, oz);
                 drawn++;
             }
             if (renderStateActive) {

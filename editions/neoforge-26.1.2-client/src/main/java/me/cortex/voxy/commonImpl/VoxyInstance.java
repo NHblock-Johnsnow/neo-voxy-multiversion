@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map.Entry;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.StampedLock;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
@@ -14,6 +15,7 @@ import me.cortex.voxy.common.thread.ServiceManager;
 import me.cortex.voxy.common.thread.UnifiedServiceThreadPool;
 import me.cortex.voxy.common.util.MemoryBuffer;
 import me.cortex.voxy.common.world.WorldEngine;
+import me.cortex.voxy.common.world.SurfaceMigrationService;
 import me.cortex.voxy.common.world.service.SectionSavingService;
 import me.cortex.voxy.common.world.service.VoxelIngestService;
 
@@ -24,6 +26,7 @@ public abstract class VoxyInstance {
    protected final UnifiedServiceThreadPool threadPool;
    protected final SectionSavingService savingService;
    protected final VoxelIngestService ingestService;
+   private final SurfaceMigrationService surfaceMigrationService;
    private final StampedLock activeWorldLock = new StampedLock();
    private final HashMap<WorldIdentifier, WorldEngine> activeWorlds = new HashMap<>();
    protected final ImportManager importManager;
@@ -36,6 +39,7 @@ public abstract class VoxyInstance {
          this.threadPool = new UnifiedServiceThreadPool();
          this.savingService = new SectionSavingService(this.getServiceManager());
          this.ingestService = new VoxelIngestService(this.getServiceManager());
+         this.surfaceMigrationService = new SurfaceMigrationService(this.getServiceManager());
          this.importManager = this.createImportManager();
          this.savingServiceRateLimiter = () -> this.savingService.getTaskCount() < 1200;
          this.worldCleaner = new Thread(() -> {
@@ -88,6 +92,10 @@ public abstract class VoxyInstance {
 
    public VoxelIngestService getIngestService() {
       return this.ingestService;
+   }
+
+   public SurfaceMigrationService getSurfaceMigrationService() {
+      return this.surfaceMigrationService;
    }
 
    public ImportManager getImportManager() {
@@ -191,39 +199,47 @@ public abstract class VoxyInstance {
       }
    }
 
-   public void cleanIdle() {
-      List<WorldIdentifier> idleWorlds = null;
-      long stamp = this.activeWorldLock.readLock();
-
-      for (Entry<WorldIdentifier, WorldEngine> pair : this.activeWorlds.entrySet()) {
-         if (pair.getValue().isWorldIdle()) {
-            if (idleWorlds == null) {
-               idleWorlds = new ArrayList<>();
+    public void cleanIdle() {
+        List<WorldIdentifier> idleWorlds = null;
+        List<WorldEngine> retryWorlds = null;
+        long readStamp = this.activeWorldLock.readLock();
+        try {
+            for (var entry : this.activeWorlds.entrySet()) {
+                if (entry.getValue().hasPendingSaveRetries()) {
+                    if (retryWorlds == null) retryWorlds = new ArrayList<>();
+                    retryWorlds.add(entry.getValue());
+                }
+                if (entry.getValue().isWorldIdle()) {
+                    if (idleWorlds == null) idleWorlds = new ArrayList<>();
+                    idleWorlds.add(entry.getKey());
+                }
             }
+        } finally {
+            this.activeWorldLock.unlockRead(readStamp);
+        }
 
-            idleWorlds.add(pair.getKey());
-         }
-      }
+        // 回调可能取得世界写锁，不能在 activeWorldLock 内重试。
+        if (retryWorlds != null) {
+            for (var world : retryWorlds) world.retryFailedSaves();
+        }
+        if (idleWorlds == null) return;
 
-      this.activeWorldLock.unlockRead(stamp);
-      if (idleWorlds != null) {
-         stamp = this.activeWorldLock.writeLock();
-
-         for (WorldIdentifier id : idleWorlds) {
-            WorldEngine world = this.activeWorlds.remove(id);
-            if (world != null) {
-               if (!world.isWorldIdle()) {
-                  this.activeWorlds.put(id, world);
-               } else {
-                  Logger.info("Shutting down idle world: " + id.getLongHash());
-                  world.free();
-               }
+        long writeStamp = this.activeWorldLock.writeLock();
+        try {
+            for (var id : idleWorlds) {
+                var world = this.activeWorlds.remove(id);
+                if (world == null) continue;
+                if (!world.isWorldIdle()) {
+                    this.activeWorlds.put(id, world);
+                    continue;
+                }
+                Logger.info("Shutting down idle world: " + id.getLongHash());
+                world.free();
             }
-         }
-
-         this.activeWorldLock.unlockWrite(stamp);
-      }
-   }
+        } finally {
+            this.activeWorldLock.unlockWrite(writeStamp);
+        }
+    }
 
    public void addDebug(List<String> debug) {
       debug.add("MemoryBuffer, Count/Size (mb): " + MemoryBuffer.getCount() + "/" + MemoryBuffer.getTotalSize() / 1000000L);
@@ -238,80 +254,116 @@ public abstract class VoxyInstance {
       );
    }
 
+   private List<WorldEngine> snapshotWorlds() {
+      long stamp = this.activeWorldLock.readLock();
+      try {
+         return new ArrayList<>(this.activeWorlds.values());
+      } finally {
+         this.activeWorldLock.unlockRead(stamp);
+      }
+   }
+
+    private void awaitWorldQuiescence(List<WorldEngine> worlds) {
+        boolean interrupted = Thread.interrupted();
+        try {
+            long failureSince = 0;
+            long nextReport = System.nanoTime() + 2_000_000_000L;
+            while (true) {
+                int busyWorlds = 0;
+                int loadedSections = 0;
+                Throwable publicationFailure = null;
+                for (var world : worlds) {
+                    world.retryFailedSaves();
+                    Throwable enqueueFailure = world.getLastSaveEnqueueFailure();
+                    if (enqueueFailure != null) publicationFailure = enqueueFailure;
+                    if (world.isLive() && world.isWorldUsed()) {
+                        busyWorlds++;
+                        loadedSections += world.getActiveSectionCount();
+                    }
+                }
+                if (busyWorlds == 0) {
+                    return;
+                }
+
+                if (!this.savingService.isLive()) this.savingService.shutdown();
+                long now = System.nanoTime();
+                Throwable failure = publicationFailure != null ? publicationFailure : this.savingService.getLastFailure();
+                if (failure == null) failureSince = 0;
+                else if (failureSince == 0) failureSince = now;
+                if (failureSince != 0 && now - failureSince >= 5_000_000_000L) {
+                    throw new IllegalStateException("Voxy saves are failing; storage remains open for retry",
+                            failure);
+                }
+                if (now >= nextReport) {
+                    Logger.warn("Waiting for " + busyWorlds + " Voxy world engine(s) to release; loaded sections: " + loadedSections);
+                    nextReport = now + 2_000_000_000L;
+                }
+                interrupted |= Thread.interrupted();
+                LockSupport.parkNanos(1_000_000L);
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+    }
+
    public void shutdown() {
       Logger.info("Shutting down voxy instance");
       this.isRunning = false;
-
-      try {
-         this.worldCleaner.join();
-      } catch (InterruptedException var11) {
-         throw new RuntimeException(var11);
-      }
+      this.stopWorldCleaner();
 
       this.cleanIdle();
-      if (!this.activeWorlds.isEmpty()) {
-         long stamp = this.activeWorldLock.readLock();
+      var worlds = this.snapshotWorlds();
+      this.cancelWorldImports(worlds);
 
-         for (WorldEngine world : this.activeWorlds.values()) {
-            this.importManager.cancelImport(world);
-         }
+      // Keep the saver alive until final section releases have queued their writes.
+      shutdownService("surface migration", this.surfaceMigrationService::shutdown);
+      shutdownService("ingest", this.ingestService::shutdown);
+      if (!this.savingService.isLive()) this.savingService.shutdown();
+      this.awaitWorldQuiescence(worlds);
+      this.savingService.shutdown();
 
-         this.activeWorldLock.unlockRead(stamp);
-      }
+      this.freeWorlds();
+      shutdownService("thread pool", this.threadPool::shutdown);
+      Logger.info("Instance shutdown");
+   }
 
+   private void stopWorldCleaner() {
+      this.worldCleaner.interrupt();
       try {
-         this.ingestService.shutdown();
-      } catch (Exception var10) {
-         Logger.error(var10);
+         this.worldCleaner.join();
+      } catch (InterruptedException e) {
+         Thread.currentThread().interrupt();
+         Logger.error("Interrupted while stopping the Voxy world cleaner", e);
       }
+   }
 
-      try {
-         this.savingService.shutdown();
-      } catch (Exception var9) {
-         Logger.error(var9);
+   private void cancelWorldImports(List<WorldEngine> worlds) {
+      for (var world : worlds) {
+         this.importManager.cancelImport(world);
       }
+   }
 
+   private void freeWorlds() {
       long stamp = this.activeWorldLock.writeLock();
-      if (!this.activeWorlds.isEmpty()) {
-         boolean printedNotice = false;
-
-         for (WorldEngine world : new ArrayList<>(this.activeWorlds.values())) {
-            if (world.isWorldUsed()) {
-               if (!printedNotice) {
-                  printedNotice = true;
-                  Logger.error("Not all worlds shutdown, force closing worlds");
-               }
-
-               this.activeWorldLock.unlockWrite(stamp);
-
-               while (world.isWorldUsed()) {
-                  try {
-                     Thread.sleep(10L);
-                  } catch (InterruptedException var8) {
-                     throw new RuntimeException(var8);
-                  }
-               }
-
-               stamp = this.activeWorldLock.writeLock();
-            }
-
-            world.free();
-         }
-
-         this.activeWorlds.clear();
-      }
-
       try {
-         this.threadPool.shutdown();
-      } catch (Exception var7) {
-         Logger.error(var7);
-      }
-
-      if (!this.activeWorlds.isEmpty()) {
-         throw new IllegalStateException("Not all worlds shutdown");
-      } else {
-         Logger.info("Instance shutdown");
+         for (var entry : this.activeWorlds.entrySet()) {
+            entry.getKey().cachedEngineObject = null;
+            var world = entry.getValue();
+            if (world.isLive()) {
+               world.free();
+            }
+         }
+         this.activeWorlds.clear();
+      } finally {
          this.activeWorldLock.unlockWrite(stamp);
+      }
+   }
+
+   private void shutdownService(String name, Runnable shutdown) {
+      try {
+         shutdown.run();
+      } catch (Exception e) {
+         Logger.error("Failed to shut down " + name + " service", e);
       }
    }
 

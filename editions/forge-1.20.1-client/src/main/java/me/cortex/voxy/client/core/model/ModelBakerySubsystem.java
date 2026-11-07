@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core.model;
 
+import me.cortex.voxy.common.util.ExceptionCleanup;
+
 
 import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
 import me.cortex.voxy.client.VoxyClient;
@@ -24,21 +26,26 @@ public class ModelBakerySubsystem {
     private volatile Throwable processingThreadException;
     public ModelBakerySubsystem(Mapper mapper) {
         this.mapper = mapper;
-        this.factory = new ModelFactory(mapper, this.storage);
-        this.processingThread = new Thread(()->{//TODO replace this with something good/integrate it into the async processor so that we just have less threads overall
-            while (this.isRunning) {
-                while (this.factory.processAllThings());
-                LockSupport.park();
-            }
-        }, "Model factory processor");
-        this.processingThread.setUncaughtExceptionHandler((t,e)->{
-            this.isRunning = false;
-            if (e == null) {
-                e = new RuntimeException("unhandled excpetion not added");
-            }
-            this.processingThreadException = e;
-        });
-        this.processingThread.start();
+        try {
+            this.factory = new ModelFactory(mapper, this.storage);
+            this.processingThread = new Thread(()->{//TODO replace this with something good/integrate it into the async processor so that we just have less threads overall
+                while (this.isRunning) {
+                    while (this.factory.processAllThings());
+                    LockSupport.park();
+                }
+            }, "Model factory processor");
+            this.processingThread.setUncaughtExceptionHandler((t,e)->{
+                this.isRunning = false;
+                if (e == null) {
+                    e = new RuntimeException("unhandled excpetion not added");
+                }
+                this.processingThreadException = e;
+            });
+            this.processingThread.start();
+        } catch (RuntimeException | Error failure) {
+            this.releaseResources(new ExceptionCleanup(failure));
+            throw failure;
+        }
     }
 
     public void tick(long totalBudget) {
@@ -54,16 +61,31 @@ public class ModelBakerySubsystem {
     }
 
     public void shutdown() {
-        this.isRunning = false;
-        LockSupport.unpark(this.processingThread);
-        try {
-            this.processingThread.join();
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        }
+        var cleanup = new ExceptionCleanup(null);
+        this.releaseResources(cleanup);
+        cleanup.rethrow();
+    }
 
-        this.factory.free();
-        this.storage.free();
+    private void releaseResources(ExceptionCleanup cleanup) {
+        this.isRunning = false;
+        boolean interrupted = Thread.interrupted();
+        try {
+            if (this.processingThread != null) {
+                this.processingThread.interrupt();
+                while (this.processingThread.isAlive()) {
+                    LockSupport.unpark(this.processingThread);
+                    try {
+                        this.processingThread.join();
+                    } catch (InterruptedException failure) {
+                        interrupted = true;
+                    }
+                }
+            }
+            if (this.factory != null) cleanup.run(this.factory::free);
+            cleanup.run(this.storage::free);
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
+        }
     }
 
     //This is on this side only and done like this as only worker threads call this code

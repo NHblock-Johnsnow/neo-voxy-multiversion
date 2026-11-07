@@ -37,7 +37,8 @@ public final class CreateCopycatCompat {
     private static final ThreadLocal<SectionMappings> SECTION_MAPPINGS =
             ThreadLocal.withInitial(SectionMappings::new);
     private static final Map<Mapper, Map<Integer, MaterialSet>> MATERIALS_BY_MAPPER = new ConcurrentHashMap<>();
-    private static final Map<MaterialSet, MaterialKey> MATERIAL_KEYS = new ConcurrentHashMap<>();
+    private static final Map<MaterialSet, MaterialKey> MATERIAL_KEYS =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
     private static final String MATERIALS_KEY = "materials";
 
     private record MaterialSet(Map<String, BlockState> parts) {
@@ -47,7 +48,8 @@ public final class CreateCopycatCompat {
 
         BlockState primary() {
             BlockState material = this.parts.get("material");
-            return material != null ? material : this.parts.values().stream().findFirst().orElse(null);
+            return material != null ? material : this.parts.entrySet().stream()
+                    .min(Map.Entry.comparingByKey()).map(Map.Entry::getValue).orElse(null);
         }
 
     }
@@ -154,15 +156,27 @@ public final class CreateCopycatCompat {
         SectionMappings mappings = SECTION_MAPPINGS.get();
         mappings.reset();
         if (mapper == null || section == null) return;
-        if (chunk == null || chunk.getBlockEntities().isEmpty()) {
-            if (section.maybeHas(COPYCAT_STATE_PREDICATE)) {
-                int restored = DisguiseStore.load(storage, DISGUISE_TABLE, sectionX, sectionY, sectionZ,
-                        mappings::put);
-                mappings.active = restored != 0;
+        if (!section.maybeHas(COPYCAT_STATE_PREDICATE)) {
+            if (DisguiseStore.clearIfPresent(storage, DISGUISE_TABLE, sectionX, sectionY, sectionZ)) {
+                SectionListener listener = sectionListener;
+                if (listener != null) listener.changed(storage, sectionX, sectionY, sectionZ);
             }
             return;
         }
-        if (!section.maybeHas(COPYCAT_STATE_PREDICATE)) return;
+        if (chunk == null || chunk.getBlockEntities().isEmpty()) {
+            // 调色板可能保留已删除状态；只核对历史记录中的坐标。
+            int restored = DisguiseStore.load(storage, DISGUISE_TABLE, sectionX, sectionY, sectionZ,
+                    (index, id) -> {
+                        if (isCopycatState(section.getBlockState(index & 15, index >>> 8, (index >>> 4) & 15))) {
+                            mappings.put(index, id);
+                        }
+                    });
+            mappings.active = mappings.touchedCount != 0;
+            if (restored != mappings.touchedCount) {
+                storeMappings(storage, mappings, sectionX, sectionY, sectionZ);
+            }
+            return;
+        }
 
         int minY = sectionY << 4;
         int maxY = minY + 15;
@@ -218,6 +232,11 @@ public final class CreateCopycatCompat {
         //Recorded while the block entities are readable, which is the only moment the material can be
         //derived at all. Rewritten whole per section, so a block that stopped being disguised leaves
         //with the re-scan that no longer sees it.
+        storeMappings(storage, mappings, sectionX, sectionY, sectionZ);
+    }
+
+    private static void storeMappings(SectionStorage storage, SectionMappings mappings,
+                                      int sectionX, int sectionY, int sectionZ) {
         if (storage != null) {
             if (mappings.touchedCount == 0) {
                 DisguiseStore.clear(storage, DISGUISE_TABLE, sectionX, sectionY, sectionZ);

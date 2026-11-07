@@ -10,6 +10,8 @@ import org.jetbrains.annotations.Nullable;
 
 import java.lang.invoke.VarHandle;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -42,6 +44,15 @@ public class WorldEngine {
     private final ActiveSectionTracker sectionTracker;
     private ISectionChangeCallback dirtyCallback;
     private ISectionSaveCallback saveCallback;
+
+    // 仅入队异常时创建；原始对象引用不改变区段引用计数。
+    private volatile ConcurrentLinkedQueue<WorldSection> failedSaves;
+    private ConcurrentHashMap<WorldSection, Boolean> failedSaveKeys;
+    private volatile Throwable failedSaveCause;
+    private long failedSaveVersion;
+    private long nextSaveRetryNanos;
+    private boolean retryingFailedSaves;
+
     volatile boolean isLive = true;
 
     public void setDirtyCallback(ISectionChangeCallback callback) {
@@ -53,6 +64,10 @@ public class WorldEngine {
     }
 
     public Mapper getMapper() {return this.mapper;}
+
+    public void requestSurfaceMigration(WorldSection section) {
+        if (this.instanceIn != null) this.instanceIn.getSurfaceMigrationService().request(this, section);
+    }
 
     private final BeaconIndex beaconIndex;
 
@@ -179,11 +194,11 @@ public class WorldEngine {
         if (section.tracker != this.sectionTracker) {
             throw new IllegalStateException("Section is not from here");
         }
-        if (this.dirtyCallback != null) {
-            this.dirtyCallback.accept(section, changeState, neighborMsk);
-        }
         if ((changeState & UPDATE_TYPE_DONT_SAVE) == 0) {
             section.markDirty();
+        }
+        if (this.dirtyCallback != null) {
+            this.dirtyCallback.accept(section, changeState, neighborMsk);
         }
     }
 
@@ -273,10 +288,109 @@ public class WorldEngine {
         return this.saveSection(section, false, false);
     }
 
-    public boolean saveSection(WorldSection section, boolean nonBlocking, boolean sectionAlreadyAcquired) {
-        if (this.saveCallback != null) {
-            return this.saveCallback.save(this, section, nonBlocking, sectionAlreadyAcquired);
+    /** 仅保存任务已发布后使用；原始异常由 saveSection 原样重新抛出。 */
+    public static final class SaveEnqueueException extends RuntimeException {
+        public SaveEnqueueException(Throwable cause) {
+            super(null, cause, false, false);
         }
-        return false;
+    }
+
+    /** 入队失败只归还引用，不递归触发同一个失败的保存回调。 */
+    public static void releaseFailedSave(WorldSection section, Throwable failure) {
+        try {
+            section.release(false, 0);
+        } catch (RuntimeException | Error cleanup) {
+            if (cleanup != failure) failure.addSuppressed(cleanup);
+        }
+    }
+
+
+    private synchronized void rememberFailedSave(WorldSection section, Throwable failure) {
+        if (!section.shouldSave()) return;
+        if (this.failedSaves == null) {
+            var queue = new ConcurrentLinkedQueue<WorldSection>();
+            this.failedSaveKeys = new ConcurrentHashMap<>();
+            this.failedSaves = queue;
+        }
+        this.failedSaveCause = failure;
+        this.failedSaveVersion++;
+        if (this.failedSaveKeys.putIfAbsent(section, Boolean.TRUE) == null) {
+            try {
+                this.failedSaves.add(section);
+            } catch (RuntimeException | Error enqueueFailure) {
+                this.failedSaveKeys.remove(section);
+                throw enqueueFailure;
+            }
+        }
+    }
+
+    public boolean hasPendingSaveRetries() {
+        return this.failedSaves != null && !this.failedSaveKeys.isEmpty();
+    }
+
+    public Throwable getLastSaveEnqueueFailure() {
+        return this.hasPendingSaveRetries() ? this.failedSaveCause : null;
+    }
+
+    public void retryFailedSaves() {
+        if (this.failedSaves == null || this.saveCallback == null || !this.isLive) return;
+        long version;
+        synchronized (this) {
+            long now = System.nanoTime();
+            if (this.retryingFailedSaves || this.failedSaveKeys.isEmpty()
+                    || (this.nextSaveRetryNanos != 0 && now - this.nextSaveRetryNanos < 0)) return;
+            this.retryingFailedSaves = true;
+            this.nextSaveRetryNanos = now + 100_000_000L;
+            version = this.failedSaveVersion;
+        }
+        boolean progressed = false;
+        try {
+            for (int remaining = 64; remaining > 0; remaining--) {
+                WorldSection candidate;
+                synchronized (this) {
+                    candidate = this.failedSaves.poll();
+                    if (candidate == null) break;
+                    this.failedSaveKeys.remove(candidate);
+                }
+                // 先核对当前缓存身份，再借引用；锁外调用保存和释放。
+                var section = this.sectionTracker.acquireForSaveRetry(candidate);
+                if (section == null) {
+                    progressed = true;
+                    continue;
+                }
+                try {
+                    if (!this.saveSection(section, true, true)) section.release();
+                    progressed = true;
+                } catch (RuntimeException | Error failure) {
+                    // saveSection 已按发布状态接管或归还引用，并登记未发布任务。
+                    break;
+                }
+            }
+        } finally {
+            synchronized (this) {
+                if (progressed && this.failedSaveVersion == version) this.failedSaveCause = null;
+                this.retryingFailedSaves = false;
+            }
+        }
+    }
+
+    public boolean saveSection(WorldSection section, boolean nonBlocking, boolean sectionAlreadyAcquired) {
+        if (this.saveCallback == null) return false;
+        try {
+            return this.saveCallback.save(this, section, nonBlocking, sectionAlreadyAcquired);
+        } catch (SaveEnqueueException accepted) {
+            // 已发布的任务保留队列引用，不能按未接管失败回滚。
+            if (accepted.getCause() instanceof RuntimeException failure) throw failure;
+            if (accepted.getCause() instanceof Error failure) throw failure;
+            throw accepted;
+        } catch (RuntimeException | Error failure) {
+            if (sectionAlreadyAcquired) releaseFailedSave(section, failure);
+            try {
+                this.rememberFailedSave(section, failure);
+            } catch (RuntimeException | Error registrationFailure) {
+                if (registrationFailure != failure) failure.addSuppressed(registrationFailure);
+            }
+            throw failure;
+        }
     }
 }

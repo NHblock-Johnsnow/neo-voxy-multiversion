@@ -331,18 +331,26 @@ public class ModelFactory {
     public void processUploads(long totalBudgetNanos) {
         var upload = this.uploadResults.poll();
         if (upload==null) return;
-        long deadline = System.nanoTime() + Math.max(0L, totalBudgetNanos);
+        long started = System.nanoTime();
+        long budget = Math.max(0L, totalBudgetNanos);
 
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
         glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        do {
-            upload.upload(this.storage);
-            upload.free();
-            upload = this.uploadResults.poll();
-        } while (upload != null && System.nanoTime() < deadline);
-        UploadStream.INSTANCE.commit();
+        try {
+            do {
+                try {
+                    upload.upload(this.storage);
+                } finally {
+                    upload.free();
+                }
+                // 预算耗尽后不再出队，剩余结果留待下一帧处理。
+            } while (System.nanoTime() - started < budget
+                    && (upload = this.uploadResults.poll()) != null);
+        } finally {
+            UploadStream.INSTANCE.commit();
+        }
     }
 
     private interface ResultUploader {
@@ -360,13 +368,16 @@ public class ModelFactory {
         public @Nullable MemoryBuffer biomeUpload;
 
         public void upload(ModelStore store) {//Uploads and resets for reuse
+            if (this.biomeUploadIndex != -1) {
+                store.ensureBiomeColourCapacity(this.biomeUploadIndex + this.biomeUpload.size / 4);
+            }
             this.upload(store.modelBuffer, store.modelColourBuffer, store.textures);
         }
 
         public void upload(GlBuffer modelBuffer, GlBuffer colourBuffer, GlTexture atlas) {//Uploads and resets for reuse
             this.model.cpyTo(UploadStream.INSTANCE.upload(modelBuffer, (long) this.modelId * MODEL_SIZE, MODEL_SIZE));
             if (this.biomeUploadIndex != -1) {
-                this.biomeUpload.cpyTo(UploadStream.INSTANCE.upload(colourBuffer, this.biomeUploadIndex * 4L, this.biomeUpload.size));
+                this.biomeUpload.cpyTo(UploadStream.INSTANCE.upload(colourBuffer, (BiomeBlendPalette.NORMAL_COLOUR_BASE + this.biomeUploadIndex) * 4L, this.biomeUpload.size));
                 this.biomeUploadIndex = -1;
                 this.biomeUpload.free();
                 this.biomeUpload = null;
@@ -693,6 +704,7 @@ public class ModelFactory {
         modelFlags |= isFluid && blockState.getFluidState().is(FluidTags.LAVA) ? 64 : 0;
         modelFlags |= leafModel ? 128 : 0;
         modelFlags |= fluidHeight << 8;
+        modelFlags |= isFluid ? (1 << 12) : 0;
         modelFlags |= me.cortex.voxy.client.compat.distant.TrackLodReplacement.isTrack(blockState) ? (1 << 13) : 0;
 
         //modelFlags |= blockRenderLayer == RenderLayer.getSolid()?0:1;// should discard alpha
@@ -707,7 +719,6 @@ public class ModelFactory {
         } else {
             //Populate the list of biomes for the model state
             int biomeIndex = this.modelsRequiringBiomeColours.size() * this.biomes.size();
-            if (biomeIndex + this.biomes.size() > BiomeBlendPalette.PALETTE_BASE) this.blendPalette.disable();
             MemoryUtil.memPutInt(uploadPtr, biomeIndex);
             this.modelsRequiringBiomeColours.add(new Pair<>(modelId, blockState));
             if (!this.biomes.isEmpty()) {
@@ -796,11 +807,12 @@ public class ModelFactory {
         }
 
         public void upload(ModelStore store) {
+            store.ensureBiomeColourCapacity(this.biomeColourBuffer.size / 4);
             this.upload(store.modelBuffer, store.modelColourBuffer);
         }
 
         public void upload(GlBuffer modelBuffer, GlBuffer modelColourBuffer) {
-            this.biomeColourBuffer.cpyTo(UploadStream.INSTANCE.upload(modelColourBuffer, 0, this.biomeColourBuffer.size));
+            this.biomeColourBuffer.cpyTo(UploadStream.INSTANCE.upload(modelColourBuffer, BiomeBlendPalette.NORMAL_COLOUR_BASE * 4L, this.biomeColourBuffer.size));
 
             //TODO: optimize this to like a compute scatter update or something
             long ptr = this.modelBiomeIndexPairs.address;
@@ -861,9 +873,6 @@ public class ModelFactory {
             }
         }
 
-        if (this.modelsRequiringBiomeColours.size() * this.biomes.size() > BiomeBlendPalette.PALETTE_BASE) {
-            this.blendPalette.disable();
-        }
         this.blendPalette.mirrorRebuild(result.modelBiomeIndexPairs.address,
                 this.modelsRequiringBiomeColours.size(), result.biomeColourBuffer.address,
                 (int)(result.biomeColourBuffer.size / 4), this.biomes.size());

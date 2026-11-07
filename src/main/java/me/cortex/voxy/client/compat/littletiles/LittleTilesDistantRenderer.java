@@ -1,6 +1,8 @@
 package me.cortex.voxy.client.compat.littletiles;
 
 import me.cortex.voxy.client.compat.LodPipelineHooks;
+import me.cortex.voxy.client.compat.AuxiliaryTableLoader;
+import me.cortex.voxy.client.compat.NearbyBuckets;
 import me.cortex.voxy.client.compat.create.DistantMesh;
 import me.cortex.voxy.client.compat.create.DistantMeshBuilder;
 import me.cortex.voxy.client.compat.create.DistantShaders;
@@ -30,10 +32,12 @@ import net.neoforged.neoforge.client.event.ClientTickEvent;
 import org.joml.Matrix4f;
 
 import java.util.HashMap;
-import java.util.ArrayDeque;
+import java.util.LinkedHashSet;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.TreeSet;
+import java.util.Comparator;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -65,15 +69,21 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
     private static final int BUCKET_BLOCKS = 16 << BUCKET_SHIFT;
     private static final int MAX_BAKES_IN_FLIGHT = 2;
     private static final int MAX_UPLOADS_PER_TICK = 2;
+    private static final int MAX_BAKE_CHECKS_PER_TICK = 32;
+    private static final double CANDIDATE_PADDING = 58.0;
     private static volatile LittleTilesDistantRenderer active;
 
     private final ConcurrentLinkedQueue<Update> updates = new ConcurrentLinkedQueue<>();
     private final ConcurrentLinkedQueue<BakeResult> completedBakes = new ConcurrentLinkedQueue<>();
     private final Map<Long, Entry> sections = new HashMap<>();
+    private final it.unimi.dsi.fastutil.longs.LongOpenHashSet deletedSections = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
     private final Map<Long, HashSet<Long>> spatialBuckets = new HashMap<>();
     private final ArrayList<Entry> candidates = new ArrayList<>();
-    private final ArrayDeque<Long> bakeQueue = new ArrayDeque<>();
-    private final HashSet<Long> queued = new HashSet<>();
+    private final HashSet<Entry> residentMeshes = new HashSet<>();
+    private final LinkedHashSet<Entry> bakeQueue = new LinkedHashSet<>();
+    private final TreeSet<Entry> retries = new TreeSet<>(Comparator.<Entry>comparingLong(e -> e.retryAfterNanos)
+            .thenComparingLong(e -> LittleTilesStore.key(e.snapshot.sx(), e.snapshot.sy(), e.snapshot.sz())));
+    private final HashSet<Entry> queued = new HashSet<>();
     private final HashSet<Long> baking = new HashSet<>();
     private final ExecutorService bakeExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread thread = new Thread(r, "Voxy LittleTiles baker");
@@ -82,13 +92,14 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
         return thread;
     });
     private SectionStorage storage;
+    private AuxiliaryTableLoader<LittleTilesCompat.SectionSnapshot> baseline;
     private me.cortex.voxy.common.world.WorldEngine boundEngine;
     private ClientLevel level;
     private boolean storageLoaded;
     private int lastBucketX = Integer.MIN_VALUE, lastBucketZ = Integer.MIN_VALUE;
-    private int lastRefreshX = Integer.MIN_VALUE, lastRefreshZ = Integer.MIN_VALUE;
+    private int lastRefreshX = Integer.MIN_VALUE, lastRefreshY = Integer.MIN_VALUE, lastRefreshZ = Integer.MIN_VALUE;
+    private double lastCandidateDistance = -1;
     private int lastCandidateRadius = -1;
-    private int candidateGeneration;
     private int worldGeneration;
     private int bakesInFlight;
     private boolean candidatesDirty = true;
@@ -117,43 +128,49 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
     public void tick(ClientTickEvent.Post event) {
         var mc = Minecraft.getInstance();
         if (mc.level == null) {
+            cancelBaseline();
             discardCompletedBakes();
             return;
         }
         var engine = WorldIdentifier.ofEngineNullable(mc.level);
         if (engine == null || !engine.isLive()) {
+            cancelBaseline();
             discardCompletedBakes();
             return;
         }
-        if (this.storage != engine.storage) {
+        if (this.storage != engine.storage || this.level != mc.level) {
             bindStorage(engine, mc.level);
         }
         if (!this.storageLoaded) {
-            this.storageLoaded = true;
-            for (var snapshot : LittleTilesStore.loadAll(this.storage)) {
-                this.updates.add(new Update(this.storage, snapshot, false));
-            }
+            startBaseline(engine);
         }
 
         var camera = mc.gameRenderer.getMainCamera().getPosition();
         double maxDistance = VoxyConfig.CONFIG.createRenderDistance(VoxyConfig.CONFIG.distantLittleTilesMaxChunks);
-        drainUpdates(256, camera, maxDistance * maxDistance);
+        double prefetchDistanceSq = (maxDistance + CANDIDATE_PADDING) * (maxDistance + CANDIDATE_PADDING);
+        drainBaseline(256 - drainUpdates(this.baseline == null ? 256 : 192, camera, prefetchDistanceSq), camera, prefetchDistanceSq);
         if (!VoxyConfig.CONFIG.distantLittleTiles) {
             discardCompletedBakes();
             return;
         }
         refreshCandidates(camera.x, camera.y, camera.z, maxDistance);
-        uploadCompleted(camera.x, camera.y, camera.z, maxDistance * maxDistance);
-        scheduleBakes(camera.x, camera.y, camera.z, maxDistance * maxDistance);
+        uploadCompleted(camera.x, camera.y, camera.z, prefetchDistanceSq);
+        scheduleBakes(camera.x, camera.y, camera.z, prefetchDistanceSq);
     }
 
     private void bindStorage(me.cortex.voxy.common.world.WorldEngine engine, ClientLevel level) {
         synchronized (this.updates) {
+            cancelBaseline();
             boolean sameLevel = this.level == level;
             var carried = new HashMap<Long, LittleTilesCompat.SectionSnapshot>();
             if (sameLevel) {
                 for (var entry : this.sections.entrySet()) {
                     carried.put(entry.getKey(), entry.getValue().snapshot);
+                }
+                // 已消费的删除也要迁移，不能让新存储的旧快照复活。
+                for (long key : this.deletedSections) {
+                    carried.put(key, new LittleTilesCompat.SectionSnapshot(BlockPos.getX(key), BlockPos.getY(key), BlockPos.getZ(key),
+                            java.util.List.of(), java.util.List.of(), new long[64]));
                 }
             }
             var incoming = new ArrayList<Update>();
@@ -170,13 +187,29 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
             this.level = level;
             this.storage = engine.storage;
             this.boundEngine = engine;
-            this.storageLoaded = true;
-            for (var snapshot : LittleTilesStore.loadAll(this.storage)) {
-                this.updates.add(new Update(this.storage, snapshot, false));
+            startBaseline(engine);
+            for (var snapshot : carried.values()) {
+                this.baseline.markUpdated(LittleTilesStore.key(snapshot.sx(), snapshot.sy(), snapshot.sz()));
+                this.updates.add(new Update(this.storage, snapshot, true));
             }
-            for (var snapshot : carried.values()) this.updates.add(new Update(this.storage, snapshot, true));
-            this.updates.addAll(incoming);
+            for (var pending : incoming) {
+                this.baseline.markUpdated(LittleTilesStore.key(pending.snapshot.sx(), pending.snapshot.sy(), pending.snapshot.sz()));
+                this.updates.add(pending);
+            }
         }
+    }
+
+    @Override
+    public void onResourceReload() {
+        // 旧异步结果沿用现有代次门禁丢弃，仍占额度直到实际完成。
+        this.worldGeneration++;
+        this.bakeQueue.clear();
+        this.queued.clear();
+        this.retries.clear();
+        for (Entry entry : this.sections.values()) entry.closeMeshes();
+        this.residentMeshes.clear();
+        this.candidatesDirty = true;
+        discardCompletedBakes();
     }
 
     @SubscribeEvent
@@ -273,11 +306,13 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
     // ---- CPU 烘焙与材质采样 -------------------------------------------
 
     private static CpuMeshes bake(LittleTilesCompat.SectionSnapshot snapshot, MaterialSample[] materials) {
-        var occupied = new it.unimi.dsi.fastutil.ints.IntOpenHashSet(snapshot.cells().size() * 2);
-        for (var cell : snapshot.cells()) occupied.add(cell.coordinate());
-        var opaqueBuilder = new DistantMeshBuilder();
-        var translucentBuilder = DistantMeshBuilder.translucent();
+        var occupied = new it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap(snapshot.cells().size());
+        occupied.defaultReturnValue(-1);
+        for (var cell : snapshot.cells()) occupied.put(cell.coordinate(), cell.material());
+        DistantMeshBuilder opaqueBuilder = null, translucentBuilder = null;
         try {
+            opaqueBuilder = new DistantMeshBuilder();
+            translucentBuilder = DistantMeshBuilder.translucent();
             for (var cell : snapshot.cells()) {
                 int coordinate = cell.coordinate();
                 int x = coordinate & 127, z = (coordinate >>> 7) & 127, y = (coordinate >>> 14) & 127;
@@ -287,20 +322,31 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
                 var builder = material.translucent ? translucentBuilder : opaqueBuilder;
                 int sky = (cell.light() >>> 4) & 15;
                 int block = Math.max(cell.light() & 15, material.emission);
-                if (x == 0 || !occupied.contains(coordinate - 1)) face(builder, Direction.WEST, x0,y0,z0,x1,y1,z1,material,sky,block);
-                if (x == 127 || !occupied.contains(coordinate + 1)) face(builder, Direction.EAST, x0,y0,z0,x1,y1,z1,material,sky,block);
-                if (y == 0 || !occupied.contains(coordinate - (1 << 14))) face(builder, Direction.DOWN, x0,y0,z0,x1,y1,z1,material,sky,block);
-                if (y == 127 || !occupied.contains(coordinate + (1 << 14))) face(builder, Direction.UP, x0,y0,z0,x1,y1,z1,material,sky,block);
-                if (z == 0 || !occupied.contains(coordinate - (1 << 7))) face(builder, Direction.NORTH, x0,y0,z0,x1,y1,z1,material,sky,block);
-                if (z == 127 || !occupied.contains(coordinate + (1 << 7))) face(builder, Direction.SOUTH, x0,y0,z0,x1,y1,z1,material,sky,block);
+                if (x == 0 || exposesFace(cell.material(), occupied.get(coordinate - 1), materials)) face(builder, Direction.WEST, x0,y0,z0,x1,y1,z1,material,sky,block);
+                if (x == 127 || exposesFace(cell.material(), occupied.get(coordinate + 1), materials)) face(builder, Direction.EAST, x0,y0,z0,x1,y1,z1,material,sky,block);
+                if (y == 0 || exposesFace(cell.material(), occupied.get(coordinate - (1 << 14)), materials)) face(builder, Direction.DOWN, x0,y0,z0,x1,y1,z1,material,sky,block);
+                if (y == 127 || exposesFace(cell.material(), occupied.get(coordinate + (1 << 14)), materials)) face(builder, Direction.UP, x0,y0,z0,x1,y1,z1,material,sky,block);
+                if (z == 0 || exposesFace(cell.material(), occupied.get(coordinate - (1 << 7)), materials)) face(builder, Direction.NORTH, x0,y0,z0,x1,y1,z1,material,sky,block);
+                if (z == 127 || exposesFace(cell.material(), occupied.get(coordinate + (1 << 7)), materials)) face(builder, Direction.SOUTH, x0,y0,z0,x1,y1,z1,material,sky,block);
             }
-            return new CpuMeshes(opaqueBuilder.assemble(), translucentBuilder.assemble());
+            var opaque = opaqueBuilder.assemble();
+            try {
+                return new CpuMeshes(opaque, translucentBuilder.assemble());
+            } catch (Throwable t) {
+                if (opaque != null) opaque.free();
+                throw t;
+            }
         } catch (Throwable t) {
-            opaqueBuilder.discard();
-            translucentBuilder.discard();
+            if (opaqueBuilder != null) opaqueBuilder.discard();
+            if (translucentBuilder != null) translucentBuilder.discard();
             Logger.error("Baking LittleTiles LOD mesh", t);
             return null;
         }
+    }
+
+    private static boolean exposesFace(int material, int neighbor, MaterialSample[] materials) {
+        // 不同透明材质保留交界，透明邻居也不能遮住实体表面。
+        return neighbor == -1 || (neighbor != material && materials[neighbor].translucent);
     }
 
     private static void face(DistantMeshBuilder b, Direction d, float x0,float y0,float z0,float x1,float y1,float z1,
@@ -380,72 +426,88 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
         int bucketX = Math.floorDiv((int) Math.floor(cameraX), BUCKET_BLOCKS);
         int bucketZ = Math.floorDiv((int) Math.floor(cameraZ), BUCKET_BLOCKS);
         int refreshX = (int) Math.floor(cameraX);
+        int refreshY = (int) Math.floor(cameraY);
         int refreshZ = (int) Math.floor(cameraZ);
-        int radius = Math.max(1, (int) Math.ceil(maxDistance / BUCKET_BLOCKS) + 1);
+        int radius = Math.max(1, (int) Math.ceil((maxDistance + CANDIDATE_PADDING) / BUCKET_BLOCKS) + 1);
         if (!this.candidatesDirty && bucketX == this.lastBucketX && bucketZ == this.lastBucketZ
+                && maxDistance == this.lastCandidateDistance && Math.abs(refreshY - this.lastRefreshY) < 32
                 && radius == this.lastCandidateRadius && Math.abs(refreshX - this.lastRefreshX) < 32
                 && Math.abs(refreshZ - this.lastRefreshZ) < 32) return;
 
-        int generation = ++this.candidateGeneration;
-        var oldCandidates = new ArrayList<>(this.candidates);
         this.candidates.clear();
-        double maxDistanceSq = maxDistance * maxDistance;
-        for (int z = bucketZ - radius; z <= bucketZ + radius; z++) {
-            for (int x = bucketX - radius; x <= bucketX + radius; x++) {
-                var keys = this.spatialBuckets.get(bucketKey(x, z));
-                if (keys == null) continue;
-                for (long key : keys) {
-                    Entry entry = this.sections.get(key);
-                    if (entry == null || distanceSq(entry.snapshot, cameraX, cameraY, cameraZ) > maxDistanceSq) continue;
-                    entry.candidateGeneration = generation;
-                    this.candidates.add(entry);
-                    if (!entry.hasMesh() && !this.baking.contains(key) && this.queued.add(key)) this.bakeQueue.add(key);
-                }
+        // 候选覆盖下一次刷新前的三轴位移，精确距离仍在绘制时裁剪。
+        double maxDistanceSq = (maxDistance + CANDIDATE_PADDING) * (maxDistance + CANDIDATE_PADDING);
+        NearbyBuckets.forEach(this.spatialBuckets, bucketX, bucketZ, radius, keys -> {
+            for (long key : keys) {
+                Entry entry = this.sections.get(key);
+                if (entry == null || distanceSq(entry.snapshot, cameraX, cameraY, cameraZ) > maxDistanceSq) continue;
+                this.candidates.add(entry);
+                if (!entry.bakeComplete && !this.baking.contains(key) && this.queued.add(entry)) this.bakeQueue.add(entry);
             }
-        }
+        });
 
         double farSq = (maxDistance + BUCKET_BLOCKS * 2.0) * (maxDistance + BUCKET_BLOCKS * 2.0);
-        for (Entry entry : oldCandidates) {
-            if (entry.candidateGeneration != generation && entry.hasMesh()
-                    && distanceSq(entry.snapshot, cameraX, cameraY, cameraZ) > farSq) {
+        // resident 独立于可见候选，缓慢穿过保留带后仍能回收。
+        for (var iterator = this.residentMeshes.iterator(); iterator.hasNext();) {
+            Entry entry = iterator.next();
+            if (distanceSq(entry.snapshot, cameraX, cameraY, cameraZ) > farSq) {
                 entry.closeMeshes();
+                iterator.remove();
             }
         }
         this.lastBucketX = bucketX;
         this.lastBucketZ = bucketZ;
         this.lastRefreshX = refreshX;
+        this.lastRefreshY = refreshY;
         this.lastRefreshZ = refreshZ;
         this.lastCandidateRadius = radius;
+        this.lastCandidateDistance = maxDistance;
         this.candidatesDirty = false;
     }
 
     private void scheduleBakes(double cameraX, double cameraY, double cameraZ, double maxDistanceSq) {
-        while (this.bakesInFlight < MAX_BAKES_IN_FLIGHT && !this.bakeQueue.isEmpty()) {
-            long key = this.bakeQueue.removeFirst();
-            this.queued.remove(key);
-            Entry entry = this.sections.get(key);
-            if (entry == null || entry.hasMesh() || this.baking.contains(key)) continue;
+        int remaining = MAX_BAKE_CHECKS_PER_TICK;
+        long now = System.nanoTime();
+        while (remaining > 0 && !this.retries.isEmpty() && now - this.retries.first().retryAfterNanos >= 0) {
+            this.bakeQueue.add(this.retries.pollFirst());
+            remaining--;
+        }
+        while (remaining-- > 0 && this.bakesInFlight < MAX_BAKES_IN_FLIGHT && !this.bakeQueue.isEmpty()) {
+            var iterator = this.bakeQueue.iterator();
+            Entry entry = iterator.next();
+            iterator.remove();
+            this.queued.remove(entry);
+            long key = LittleTilesStore.key(entry.snapshot.sx(), entry.snapshot.sy(), entry.snapshot.sz());
+            if (this.sections.get(key) != entry || entry.bakeComplete || this.baking.contains(key)) continue;
             if (distanceSq(entry.snapshot, cameraX, cameraY, cameraZ) > maxDistanceSq) continue;
             MaterialSample[] materials;
             try {
                 materials = prepareMaterials(entry.snapshot);
             } catch (Throwable t) {
                 Logger.error("Preparing LittleTiles LOD materials", t);
+                retryBake(key, entry);
                 continue;
             }
             int generation = this.worldGeneration;
             var snapshot = entry.snapshot;
             this.baking.add(key);
             this.bakesInFlight++;
-            this.bakeExecutor.execute(() -> {
-                CpuMeshes mesh = null;
-                try {
-                    mesh = bake(snapshot, materials);
-                } catch (Throwable t) {
-                    Logger.error("Baking LittleTiles LOD mesh", t);
-                }
-                this.completedBakes.add(new BakeResult(key, generation, snapshot, mesh));
-            });
+            try {
+                this.bakeExecutor.execute(() -> {
+                    CpuMeshes mesh = null;
+                    try {
+                        mesh = bake(snapshot, materials);
+                    } catch (Throwable t) {
+                        Logger.error("Baking LittleTiles LOD mesh", t);
+                    }
+                    this.completedBakes.add(new BakeResult(key, generation, snapshot, mesh));
+                });
+            } catch (java.util.concurrent.RejectedExecutionException e) {
+                this.baking.remove(key);
+                this.bakesInFlight--;
+                retryBake(key, entry);
+                Logger.error("Scheduling LittleTiles LOD bake", e);
+            }
         }
     }
 
@@ -462,8 +524,26 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
                 if (entry != null && !entry.hasMesh()) this.candidatesDirty = true;
                 continue;
             }
-            entry.opaqueMesh = DistantMeshBuilder.upload(result.mesh == null ? null : result.mesh.opaque);
-            entry.translucentMesh = DistantMeshBuilder.upload(result.mesh == null ? null : result.mesh.translucent);
+            if (result.mesh == null) {
+                retryBake(result.key, entry);
+                continue;
+            }
+            DistantMesh opaque = null, translucent = null;
+            try {
+                opaque = DistantMeshBuilder.upload(result.mesh.opaque);
+                translucent = DistantMeshBuilder.upload(result.mesh.translucent);
+                entry.opaqueMesh = opaque;
+                entry.translucentMesh = translucent;
+                entry.bakeComplete = true;
+                if (entry.hasMesh()) this.residentMeshes.add(entry);
+            } catch (Throwable t) {
+                if (opaque != null) opaque.free();
+                if (translucent != null) translucent.free();
+                retryBake(result.key, entry);
+                Logger.error("Uploading LittleTiles LOD mesh", t);
+            } finally {
+                result.mesh.free();
+            }
             uploaded++;
         }
     }
@@ -474,6 +554,14 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
             this.bakesInFlight = Math.max(0, this.bakesInFlight - 1);
             this.baking.remove(result.key);
             if (result.mesh != null) result.mesh.free();
+            this.candidatesDirty = true;
+        }
+    }
+
+    private void retryBake(long key, Entry entry) {
+        if (this.sections.get(key) == entry && this.queued.add(entry)) {
+            entry.retryAfterNanos = System.nanoTime() + 1_000_000_000L;
+            this.retries.add(entry);
         }
     }
 
@@ -499,20 +587,25 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
 
     private void clearMeshes() {
         for (var entry : this.sections.values()) entry.closeMeshes();
+        this.residentMeshes.clear();
         this.sections.clear();
+        this.deletedSections.clear();
         this.spatialBuckets.clear();
         this.candidates.clear();
         this.bakeQueue.clear();
+        this.retries.clear();
         this.queued.clear();
         this.worldGeneration++;
         this.lastBucketX = this.lastBucketZ = Integer.MIN_VALUE;
-        this.lastRefreshX = this.lastRefreshZ = Integer.MIN_VALUE;
+        this.lastRefreshX = this.lastRefreshY = this.lastRefreshZ = Integer.MIN_VALUE;
+        this.lastCandidateDistance = -1;
         this.lastCandidateRadius = -1;
         this.candidatesDirty = true;
         discardCompletedBakes();
     }
 
     private void checkpoint() {
+        cancelBaseline();
         if (this.storage == null || this.boundEngine == null || !this.boundEngine.isLive()) return;
         drainUpdates(Integer.MAX_VALUE, null, 0.0);
         for (var entry : this.sections.values()) {
@@ -525,28 +618,67 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
         }
     }
 
-    private void drainUpdates(int limit, Vec3 camera, double maxDistanceSq) {
+    private int drainUpdates(int limit, Vec3 camera, double maxDistanceSq) {
         Update update;
         int applied = 0;
         while (applied < limit && (update = this.updates.poll()) != null) {
-            if (update.storage != this.storage) continue;
             applied++;
+            if (update.storage != this.storage) continue;
             var snapshot = update.snapshot;
             long key = LittleTilesStore.key(snapshot.sx(), snapshot.sy(), snapshot.sz());
-            Entry old = this.sections.remove(key);
-            if (old != null) {
-                removeFromSpatialIndex(key, old);
-                old.closeMeshes();
-            }
-            this.queued.remove(key);
-            if (update.persist) LittleTilesStore.save(this.storage, snapshot);
-            if (snapshot.cells().isEmpty()) continue;
-            Entry entry = new Entry(snapshot, null);
-            this.sections.put(key, entry);
-            addToSpatialIndex(key, entry);
-            if (camera != null && distanceSq(snapshot, camera.x(), camera.y(), camera.z()) <= maxDistanceSq
-                    && !this.baking.contains(key) && this.queued.add(key)) this.bakeQueue.add(key);
+            if (this.baseline != null) this.baseline.markUpdated(key);
+            installSnapshot(snapshot, update.persist, camera, maxDistanceSq);
         }
+        return applied;
+    }
+
+    private void installSnapshot(LittleTilesCompat.SectionSnapshot snapshot, boolean persist, Vec3 camera, double maxDistanceSq) {
+        long key = LittleTilesStore.key(snapshot.sx(), snapshot.sy(), snapshot.sz());
+        Entry old = this.sections.remove(key);
+        if (old != null) {
+            removeFromSpatialIndex(key, old);
+            old.closeMeshes();
+            this.residentMeshes.remove(old);
+            this.bakeQueue.remove(old);
+            this.retries.remove(old);
+            this.queued.remove(old);
+        }
+        if (persist) LittleTilesStore.save(this.storage, snapshot);
+        if (snapshot.cells().isEmpty()) {
+            this.deletedSections.add(key);
+            return;
+        }
+        this.deletedSections.remove(key);
+        Entry entry = new Entry(snapshot, null);
+        this.sections.put(key, entry);
+        addToSpatialIndex(key, entry);
+        if (camera != null && distanceSq(snapshot, camera.x(), camera.y(), camera.z()) <= maxDistanceSq
+                && !this.baking.contains(key) && this.queued.add(entry)) this.bakeQueue.add(entry);
+    }
+
+    private void startBaseline(me.cortex.voxy.common.world.WorldEngine engine) {
+        this.storageLoaded = true;
+        this.baseline = new AuxiliaryTableLoader<>(engine, LittleTilesStore.TABLE, (key, value) -> {
+            var snapshot = LittleTilesStore.decode(value);
+            return snapshot != null && LittleTilesStore.key(snapshot.sx(), snapshot.sy(), snapshot.sz()) == key ? snapshot : null;
+        }, snapshot -> 576L + snapshot.cells().size() * 40L + snapshot.materials().size() * 32L);
+        for (long key : this.sections.keySet()) this.baseline.markUpdated(key);
+        for (long key : this.deletedSections) this.baseline.markUpdated(key);
+    }
+
+    private void drainBaseline(int limit, Vec3 camera, double maxDistanceSq) {
+        if (this.baseline == null) return;
+        this.baseline.drain(limit, (key, snapshot) -> installSnapshot(snapshot, false, camera, maxDistanceSq));
+        if (this.baseline.isFinished()) {
+            this.baseline.close();
+            this.baseline = null;
+        }
+    }
+
+    private void cancelBaseline() {
+        if (this.baseline != null) this.baseline.close();
+        this.baseline = null;
+        this.storageLoaded = false;
     }
 
     private static double distanceSq(LittleTilesCompat.SectionSnapshot snapshot, double x, double y, double z) {
@@ -572,10 +704,12 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
         DistantMesh opaqueMesh;
         DistantMesh translucentMesh;
         long bucket;
-        int candidateGeneration;
+        boolean bakeComplete;
+        long retryAfterNanos;
         Entry(LittleTilesCompat.SectionSnapshot snapshot, DistantMesh mesh) {
             this.snapshot = snapshot;
             this.opaqueMesh = mesh;
+            this.bakeComplete = mesh != null;
         }
         boolean hasMesh() { return opaqueMesh != null || translucentMesh != null; }
         void closeMeshes() {
@@ -583,6 +717,7 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
             if (translucentMesh != null) translucentMesh.free();
             opaqueMesh = null;
             translucentMesh = null;
+            bakeComplete = false;
         }
     }
 }

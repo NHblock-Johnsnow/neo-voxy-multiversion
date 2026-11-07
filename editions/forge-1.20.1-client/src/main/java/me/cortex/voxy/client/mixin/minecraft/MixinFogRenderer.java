@@ -9,6 +9,8 @@ import net.minecraft.client.renderer.FogRenderer;
 import net.minecraft.client.renderer.FogRenderer.FogMode;
 
 import net.minecraft.world.level.material.FogType;
+import net.minecraft.world.effect.MobEffects;
+import net.minecraft.world.entity.LivingEntity;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -32,6 +34,9 @@ public class MixinFogRenderer {
     ) {
         var vrs = IGetVoxyRenderSystem.getNullable();
         if (vrs == null || IrisUtil.irisShaderPackEnabled()) return;
+        // 状态效果雾由原版维护；LOD 停绘时也不能移除它。
+        if (camera.getEntity() instanceof LivingEntity living
+                && (living.hasEffect(MobEffects.BLINDNESS) || living.hasEffect(MobEffects.DARKNESS))) return;
 
         float originalEnd = RenderSystem.getShaderFogEnd();
         boolean shortRangeFog = originalEnd < 10.0f;

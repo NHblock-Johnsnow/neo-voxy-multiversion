@@ -32,7 +32,7 @@ uint quadUsesBlendPalette(uint64_t quad) { return Eu32(quad, 1, 63); }
 uint extractBlendIdx(uint64_t quad) { return Eu32(quad, 9, 46) | (Eu32(quad, 4, 42) << 9); }
 
 uint extractFluidLowerHeight(uint64_t quad) {
-    return quadUsesBlendPalette(quad) == 0u ? Eu32(quad, 4, 42) : 0u;
+    return Eu32(quad, 4, 42);
 }
 
 uint extractFluidShapePayload(uint64_t quad) {
@@ -40,7 +40,7 @@ uint extractFluidShapePayload(uint64_t quad) {
 }
 
 bool quadHasFluidShape(uint64_t quad) {
-    return quadUsesBlendPalette(quad) == 0u && Eu32(quad, 4, 42) != 0u;
+    return Eu32(quad, 4, 42) != 0u;
 }
 
 bool isQuadEmpty(uint64_t quad) {
@@ -76,8 +76,8 @@ uint extractFace(ivec2 quad) {
 }
 
 uint extractStateId(ivec2 quad) {
-    //Eu32(quad, 20, 26);
-    return Eu32v(quad, 6, 26)|(Eu32v(quad, 14, 32)<<6);
+    // 模型只占 16 位，不能读取相邻的形状或混色辅助位。
+    return Eu32v(quad, 6, 26)|(Eu32v(quad, 10, 32)<<6);
 }
 
 uint extractBiomeId(ivec2 quad) {
@@ -92,7 +92,7 @@ uint quadUsesBlendPalette(ivec2 quad) { return Eu32v(quad, 1, 63); }
 uint extractBlendIdx(ivec2 quad) { return Eu32v(quad, 9, 46) | (Eu32v(quad, 4, 42) << 9); }
 
 uint extractFluidLowerHeight(ivec2 quad) {
-    return quadUsesBlendPalette(quad) == 0u ? Eu32v(quad, 4, 42) : 0u;
+    return Eu32v(quad, 4, 42);
 }
 
 uint extractFluidShapePayload(ivec2 quad) {
@@ -100,7 +100,7 @@ uint extractFluidShapePayload(ivec2 quad) {
 }
 
 bool quadHasFluidShape(ivec2 quad) {
-    return quadUsesBlendPalette(quad) == 0u && Eu32v(quad, 4, 42) != 0u;
+    return Eu32v(quad, 4, 42) != 0u;
 }
 
 bool isQuadEmpty(ivec2 quad) {

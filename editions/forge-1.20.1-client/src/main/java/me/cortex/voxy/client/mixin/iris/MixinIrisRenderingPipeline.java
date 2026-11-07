@@ -7,6 +7,7 @@ import me.cortex.voxy.client.iris.IGetVoxyPatchData;
 import me.cortex.voxy.client.iris.IrisShaderPatch;
 import me.cortex.voxy.client.iris.IrisVoxyRenderPipelineData;
 import net.irisshaders.iris.gl.buffer.ShaderStorageBufferHolder;
+import net.irisshaders.iris.gl.sampler.GlSampler;
 import net.irisshaders.iris.pipeline.IrisRenderingPipeline;
 import net.irisshaders.iris.shaderpack.programs.ProgramSet;
 import net.irisshaders.iris.uniforms.custom.CustomUniforms;
@@ -27,6 +28,7 @@ public class MixinIrisRenderingPipeline implements IGetVoxyPatchData, IGetIrisVo
     @Unique IrisShaderPatch patchData;
     @Unique
     IrisVoxyRenderPipelineData pipeline;
+    @Unique private GlSampler voxy$depthSampler;
 
     @Redirect(method = "<init>", at = @At(value = "INVOKE", target = "Lnet/irisshaders/iris/uniforms/custom/CustomUniforms;optimise()V"))
     private void voxy$optimiseCustomUniforms(CustomUniforms customUniforms, ProgramSet programSet) {
@@ -75,5 +77,21 @@ public class MixinIrisRenderingPipeline implements IGetVoxyPatchData, IGetIrisVo
     @Override
     public IrisVoxyRenderPipelineData voxy$getPipelineData() {
         return this.pipeline;
+    }
+
+    @Override
+    public GlSampler voxy$getDepthSampler() {
+        if (this.voxy$depthSampler == null) {
+            this.voxy$depthSampler = new GlSampler(false, true, false, false);
+        }
+        return this.voxy$depthSampler;
+    }
+
+    @Inject(method = "destroy", at = @At("TAIL"), remap = false)
+    private void voxy$releaseDepthSampler(CallbackInfo ci) {
+        if (this.voxy$depthSampler != null) {
+            this.voxy$depthSampler.destroy();
+            this.voxy$depthSampler = null;
+        }
     }
 }

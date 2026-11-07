@@ -32,6 +32,7 @@ public final class WorldSection {
    volatile boolean isDirty;
    private volatile int atomicState = 1;
    public static int RELEASE_HINT_POSSIBLE_REUSE;
+   public static int RELEASE_HINT_DONT_CACHE = 2;
 
    WorldSection(int lvl, int x, int y, int z, ActiveSectionTracker tracker) {
       this.lvl = lvl;
@@ -40,6 +41,7 @@ public final class WorldSection {
       this.z = z;
       this.key = WorldEngine.getWorldSectionId(lvl, x, y, z);
       this.tracker = tracker;
+      this.surfaceData = SurfaceDataCoverage.legacy(lvl);
       this.data = ARRAY_REUSE_CACHE.poll();
       if (this.data == null) {
          this.data = new long[32768];
@@ -49,7 +51,16 @@ public final class WorldSection {
    }
 
    void primeForReuse() {
-      ATOMIC_STATE_HANDLE.set((WorldSection)this, (int)1);
+      // 复用时直接持有加载者引用，避免迟到卸载回调看到零引用窗口。
+      ATOMIC_STATE_HANDLE.set((WorldSection)this, (int)3);
+   }
+
+   volatile SurfaceDataCoverage surfaceData;
+   volatile long surfaceMigrationRetryAfter;
+   volatile boolean legacySurfaceSource;
+
+   public SurfaceDataCoverage getSurfaceData() {
+      return this.surfaceData;
    }
 
    public long[] _unsafeGetRawDataArray() {
@@ -201,8 +212,9 @@ public final class WorldSection {
       byte prev;
       byte next;
       do {
-         prev = this.getNonEmptyChildren();
-         next = (byte)(prev & ~msk | (child.getNonEmptyChildren() != 0 ? msk : 0));
+         prev = (byte) NON_EMPTY_CHILD_HANDLE.getVolatile(this);
+         next = (byte)(prev & ~msk | ((byte) NON_EMPTY_CHILD_HANDLE.getVolatile(child) != 0 ? msk : 0));
+         if (prev == next) return 0;
       } while (!NON_EMPTY_CHILD_HANDLE.compareAndSet((WorldSection)this, (byte)prev, (byte)next));
 
       return prev != 0 ^ next != 0 ? 2 : (prev != next ? 1 : 0);

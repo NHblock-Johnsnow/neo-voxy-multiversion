@@ -176,13 +176,11 @@ public final class SeasonalSnowRefresher {
                     continue;
                 }
                 try {
-                    int changed = refreshSection(engine, level, mapper, biomes, section,
+                    int changed = refreshAndRemipSection(engine, level, mapper, biomes, section,
                             glowBlocksSnow, glowLevel, snowyTree);
                     if (changed > 0) {
                         flipped += changed;
                         rewritten++;
-                        engine.markDirty(section, WorldEngine.UPDATE_TYPE_BLOCK_BIT, 0);
-                        remipIntoParents(engine, mapper, section, section._rawOrNull());
                     }
                 } finally {
                     section.release(WorldSection.RELEASE_HINT_DONT_CACHE);
@@ -225,7 +223,22 @@ public final class SeasonalSnowRefresher {
         }
     }
 
-    /** @return how many voxels changed */
+    private static int refreshAndRemipSection(WorldEngine engine, Level level, Mapper mapper, BiomeCache biomes,
+                                            WorldSection section,
+                                            boolean glowBlocksSnow, int glowLevel, boolean snowyTree) {
+        // 与 ingest 共用底层区段锁，直到全部父层更新完成；不同区段仍可并行。
+        synchronized (section) {
+            int changed = refreshSection(engine, level, mapper, biomes, section,
+                    glowBlocksSnow, glowLevel, snowyTree);
+            if (changed > 0) {
+                engine.markDirty(section, WorldEngine.UPDATE_TYPE_BLOCK_BIT, 0);
+                remipIntoParents(engine, mapper, section, section._rawOrNull());
+            }
+            return changed;
+        }
+    }
+
+    /** @return how many voxels changed; caller holds the section lock */
     private static int refreshSection(WorldEngine engine, Level level, Mapper mapper, BiomeCache biomes,
                                       WorldSection section,
                                       boolean glowBlocksSnow, int glowLevel, boolean snowyTree) {
@@ -305,15 +318,8 @@ public final class SeasonalSnowRefresher {
                             continue;
                         }
 
-                        //Deciding took long enough for ingest to have replaced this voxel. Writing a
-                        //value derived from the stale read would roll its work back, and it will have
-                        //used the current season anyway - so re-read and only write if nothing moved.
-                        long current = data[idx];
-                        if (Mapper.getBlockId(current) != storedId) {
-                            continue;
-                        }
                         int newId = wantSnowy ? MAX_BLOCK_ID - baseId : baseId;
-                        data[idx] = (current & ~BLOCK_ID_MASK) | (Integer.toUnsignedLong(newId) << BLOCK_ID_SHIFT);
+                        data[idx] = (voxel & ~BLOCK_ID_MASK) | (Integer.toUnsignedLong(newId) << BLOCK_ID_SHIFT);
                         changed++;
                     }
                 }
@@ -337,12 +343,43 @@ public final class SeasonalSnowRefresher {
     });
 
     private static void remipIntoParents(WorldEngine engine, Mapper mapper, WorldSection section, long[] data) {
+        WorldSection[] parents = new WorldSection[WorldEngine.MAX_LOD_LAYER];
+        try {
+            int highest = 0;
+            for (int lvl = 1; lvl <= parents.length; lvl++) {
+                var parent = engine.acquireIfExists(lvl, section.x >> lvl, section.y >> lvl, section.z >> lvl);
+                parents[lvl - 1] = parent;
+                if (parent != null && needsLegacyCleanup(section, parent, lvl)) highest = lvl;
+            }
+            if (highest != 0) remipLegacyParents(engine, mapper, section, data, parents, highest);
+        } finally {
+            for (var parent : parents) if (parent != null) parent.release();
+        }
+    }
+
+    private static boolean needsLegacyCleanup(WorldSection section, WorldSection parent, int lvl) {
+        if (parent._rawOrNull() == null) return false;
+        var coverage = parent.getSurfaceData();
+        if (coverage.mode() != 2) return coverage.mode() == 0;
+        int ox = (section.x << (5 - lvl)) & 31;
+        int oy = (section.y << (5 - lvl)) & 31;
+        int oz = (section.z << (5 - lvl)) & 31;
+        int step = 16 >> lvl;
+        // 一个 32³ 底层段只覆盖八个输入标记，无须扫描父层体素。
+        for (int y = 0; y < 2; y++) for (int z = 0; z < 2; z++) for (int x = 0; x < 2; x++) {
+            if (!coverage.isKnownVoxel(WorldSection.getIndex(ox + x * step, oy + y * step, oz + z * step))) return true;
+        }
+        return false;
+    }
+
+    private static void remipLegacyParents(WorldEngine engine, Mapper mapper, WorldSection section, long[] data,
+                                           WorldSection[] parents, int highest) {
         int stateCount = mapper.getBlockStateCount();
         long[][] scratch = MIP_SCRATCH.get();
         long[] cur = data;
         int curSide = SECTION_WIDTH;
 
-        for (int lvl = 1; lvl <= WorldEngine.MAX_LOD_LAYER; lvl++) {
+        for (int lvl = 1; lvl <= highest; lvl++) {
             int side = curSide >> 1;
             long[] next = scratch[lvl - 1];
             for (int y = 0; y < side; y++) {
@@ -363,63 +400,61 @@ public final class SeasonalSnowRefresher {
                 }
             }
 
-            applyLevel(engine, section, lvl, next, side, stateCount);
+            var parent = parents[lvl - 1];
+            if (parent != null && needsLegacyCleanup(section, parent, lvl)) {
+                synchronized (parent) {
+                    applyLevelLocked(engine, section, parent, lvl, next, side, stateCount);
+                }
+            }
             cur = next;
             curSide = side;
         }
     }
 
-    private static void applyLevel(WorldEngine engine, WorldSection section, int lvl,
-                                   long[] computed, int side, int stateCount) {
-        WorldSection parent = engine.acquireIfExists(lvl,
-                section.x >> lvl, section.y >> lvl, section.z >> lvl);
-        if (parent == null) {
+    private static void applyLevelLocked(WorldEngine engine, WorldSection section, WorldSection parent, int lvl,
+                                         long[] computed, int side, int stateCount) {
+        long[] pdata = parent._rawOrNull();
+        if (pdata == null) {
+            //Uniform parent: one value over the whole thing, so there is no per-voxel snow state to
+            //correct. Materialising it here would cost 256KiB to write nothing.
             return;
         }
-        try {
-            long[] pdata = parent._rawOrNull();
-            if (pdata == null) {
-                //Uniform parent: one value over the whole thing, so there is no per-voxel snow state to
-                //correct. Materialising it here would cost 256KiB to write nothing.
-                return;
-            }
-            //Where this section lands inside the parent: its 32 blocks are 32>>lvl of the parent's voxels
-            int ox = (section.x << (5 - lvl)) & 31;
-            int oy = (section.y << (5 - lvl)) & 31;
-            int oz = (section.z << (5 - lvl)) & 31;
+        //Where this section lands inside the parent: its 32 blocks are 32>>lvl of the parent's voxels
+        int ox = (section.x << (5 - lvl)) & 31;
+        int oy = (section.y << (5 - lvl)) & 31;
+        int oz = (section.z << (5 - lvl)) & 31;
 
-            boolean touched = false;
-            for (int y = 0; y < side; y++) {
-                for (int z = 0; z < side; z++) {
-                    for (int x = 0; x < side; x++) {
-                        long want = computed[cubeIndex(x, y, z, side)];
-                        int pidx = WorldSection.getIndex(ox + x, oy + y, oz + z);
-                        long have = pdata[pidx];
-                        if (want == have) {
-                            continue;
-                        }
-                        int wantId = Mapper.getBlockId(want);
-                        int haveId = Mapper.getBlockId(have);
-                        boolean wantSnowy = wantId >= stateCount;
-                        boolean haveSnowy = haveId >= stateCount;
-                        int wantBase = wantSnowy ? MAX_BLOCK_ID - wantId : wantId;
-                        int haveBase = haveSnowy ? MAX_BLOCK_ID - haveId : haveId;
-                        //Disagreeing about which block this is means the mip picked differently than
-                        //ingest did - not something a season change should be rewriting
-                        if (wantBase != haveBase || wantSnowy == haveSnowy) {
-                            continue;
-                        }
-                        int newId = wantSnowy ? MAX_BLOCK_ID - haveBase : haveBase;
-                        pdata[pidx] = (have & ~BLOCK_ID_MASK) | (Integer.toUnsignedLong(newId) << BLOCK_ID_SHIFT);
-                        touched = true;
+        boolean touched = false;
+        for (int y = 0; y < side; y++) {
+            for (int z = 0; z < side; z++) {
+                for (int x = 0; x < side; x++) {
+                    long want = computed[cubeIndex(x, y, z, side)];
+                    int pidx = WorldSection.getIndex(ox + x, oy + y, oz + z);
+                    // raw 区域只在建面视图换季，不能把父层原始材质改成派生雪编码。
+                    if (parent.getSurfaceData().isKnownVoxel(pidx)) continue;
+                    long have = pdata[pidx];
+                    if (want == have) {
+                        continue;
                     }
+                    int wantId = Mapper.getBlockId(want);
+                    int haveId = Mapper.getBlockId(have);
+                    boolean wantSnowy = wantId >= stateCount;
+                    boolean haveSnowy = haveId >= stateCount;
+                    int wantBase = wantSnowy ? MAX_BLOCK_ID - wantId : wantId;
+                    int haveBase = haveSnowy ? MAX_BLOCK_ID - haveId : haveId;
+                    //Disagreeing about which block this is means the mip picked differently than
+                    //ingest did - not something a season change should be rewriting
+                    if (wantBase != haveBase || wantSnowy == haveSnowy) {
+                        continue;
+                    }
+                    int newId = wantSnowy ? MAX_BLOCK_ID - haveBase : haveBase;
+                    pdata[pidx] = (have & ~BLOCK_ID_MASK) | (Integer.toUnsignedLong(newId) << BLOCK_ID_SHIFT);
+                    touched = true;
                 }
             }
-            if (touched) {
-                engine.markDirty(parent, WorldEngine.UPDATE_TYPE_BLOCK_BIT, 0);
-            }
-        } finally {
-            parent.release();
+        }
+        if (touched) {
+            engine.markDirty(parent, WorldEngine.UPDATE_TYPE_BLOCK_BIT, 0);
         }
     }
 

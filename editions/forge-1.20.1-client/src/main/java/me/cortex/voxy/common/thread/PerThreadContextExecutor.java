@@ -1,11 +1,12 @@
 package me.cortex.voxy.common.thread;
 
+import me.cortex.voxy.common.util.ExceptionCleanup;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.Pair;
 import me.cortex.voxy.common.util.TrackedObject;
 
 import java.util.Random;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
@@ -67,34 +68,40 @@ public class PerThreadContextExecutor extends TrackedObject {
 
     boolean run() {
         this.currentRunning.incrementAndGet();
-        if (!this.isLive) {
-            this.currentRunning.decrementAndGet();
-            this.exceptionHandler.accept(new IllegalStateException("Executor is in shutdown"));
-            return false;
-        }
-        var ctx = this.contexts.computeIfAbsent(THREAD_CTX.get(), this.contextFactory);
         try {
-            ctx.execute.run();
-        } catch (Exception e) {
-            this.exceptionHandler.accept(e);
+            if (!this.isLive) {
+                this.exceptionHandler.accept(new IllegalStateException("Executor is in shutdown"));
+                return false;
+            }
+            try {
+                var ctx = this.contexts.computeIfAbsent(THREAD_CTX.get(), this.contextFactory);
+                ctx.execute.run();
+            } catch (Exception failure) {
+                this.exceptionHandler.accept(failure);
+            }
+            return true;
+        } finally {
+            // 工厂、任务和异常回调均可能失败，不能留下永久运行计数。
+            this.currentRunning.decrementAndGet();
         }
-        this.currentRunning.decrementAndGet();
-        return true;
     }
 
     public void shutdown() {
-        if (!this.isLive) {
-            throw new IllegalStateException("Tried shutting down a executor twice");
-        }
+        if (!this.isLive) throw new IllegalStateException("Tried shutting down an executor twice");
         this.isLive = false;
-        while (this.currentRunning.get() != 0) {
-            Thread.onSpinWait();//TODO: maybe add a sleep or something
+        boolean interrupted = Thread.interrupted();
+        try {
+            while (this.currentRunning.get() != 0) {
+                LockSupport.parkNanos(1_000_000L);
+                interrupted |= Thread.interrupted();
+            }
+            var cleanup = new ExceptionCleanup(null);
+            for (var ctx : this.contexts.clear()) cleanup.run(ctx.cleanup);
+            cleanup.run(this::free0);
+            cleanup.rethrow();
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
         }
-        for (var ctx : this.contexts.clear()) {
-            ctx.cleanup.run();
-        }
-
-        this.free0();
     }
 
     @Override
@@ -132,29 +139,5 @@ public class PerThreadContextExecutor extends TrackedObject {
         }
     }
 
-    public static void main(String[] args) throws InterruptedException {
-        AtomicInteger cc = new AtomicInteger();
-        var s = new PerThreadContextExecutor(()->{
-            AtomicBoolean cleaned = new AtomicBoolean();
-            int[] a = new int[1];
-            return new Pair<>(()->{
-                if (cleaned.get()) {
-                    System.err.println("TRIED EXECUTING CLEANED CTX");
-                } else {
-                    a[0]++;
-                }
-            }, ()->{
-                if (cleaned.getAndSet(true)) {
-                    System.err.println("TRIED DOUBLE CLEANING A VALUE");
-                } else {
-                    System.out.println("Cleaned ref, exec: " + a[0]);
-                    cc.incrementAndGet();
-                }
-            });
-        });
-        inner(s);
-        System.gc();
-        s.shutdown();
-        System.err.println(cc.get());
-    }
+
 }

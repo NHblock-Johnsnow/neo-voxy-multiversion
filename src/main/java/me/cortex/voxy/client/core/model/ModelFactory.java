@@ -384,21 +384,26 @@ public class ModelFactory {
         if (upload == null) {
             return;
         }
-        long deadline = System.nanoTime() + Math.max(0L, totalBudgetNanos);
+        long started = System.nanoTime();
+        long budget = Math.max(0L, totalBudgetNanos);
 
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
         glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        do {
-            upload.upload(this.storage);
-            upload.free();
-            upload = this.uploadResults.poll();
-        } while (upload != null && System.nanoTime() < deadline);
-        if (upload != null) {
-            this.uploadResults.addFirst(upload);
+        try {
+            do {
+                try {
+                    upload.upload(this.storage);
+                } finally {
+                    upload.free();
+                }
+                // 预算耗尽后不再出队，避免丢任务和多余的回队操作。
+            } while (System.nanoTime() - started < budget
+                    && (upload = this.uploadResults.poll()) != null);
+        } finally {
+            UploadStream.INSTANCE.commit();
         }
-        UploadStream.INSTANCE.commit();
     }
 
     private interface ResultUploader {
@@ -418,13 +423,16 @@ public class ModelFactory {
         public @Nullable MemoryBuffer biomeUpload;
 
         public void upload(ModelStore store) {
+            if (this.biomeUploadIndex != -1) {
+                store.ensureBiomeColourCapacity(this.biomeUploadIndex + this.biomeUpload.size / 4);
+            }
             this.upload(store.modelBuffer, store.modelColourBuffer, store.textures);
         }
 
         public void upload(GlBuffer modelBuffer, GlBuffer colourBuffer, GlTexture atlas) {
             this.model.cpyTo(UploadStream.INSTANCE.upload(modelBuffer, (long) this.modelId * MODEL_SIZE, MODEL_SIZE));
             if (this.biomeUploadIndex != -1) {
-                this.biomeUpload.cpyTo(UploadStream.INSTANCE.upload(colourBuffer, this.biomeUploadIndex * 4L, this.biomeUpload.size));
+                this.biomeUpload.cpyTo(UploadStream.INSTANCE.upload(colourBuffer, (BiomeBlendPalette.NORMAL_COLOUR_BASE + this.biomeUploadIndex) * 4L, this.biomeUpload.size));
                 this.biomeUploadIndex = -1;
                 this.biomeUpload.free();
                 this.biomeUpload = null;
@@ -808,11 +816,6 @@ public class ModelFactory {
         } else {
             //Populate the list of biomes for the model state
             int biomeIndex = this.modelsRequiringBiomeColours.size() * this.biomes.size();
-            if (biomeIndex + this.biomes.size() > BiomeBlendPalette.PALETTE_BASE) {
-                this.blendPalette.disable();
-                Logger.error("Biome colour rows reached the blend palette boundary ("
-                        + BiomeBlendPalette.PALETTE_BASE + "); LOD biome blending disabled");
-            }
             MemoryUtil.memPutInt(uploadPtr, biomeIndex);
             this.modelsRequiringBiomeColours.add(new Pair<>(modelId, colourState));
             if (!this.biomes.isEmpty()) {
@@ -905,11 +908,12 @@ public class ModelFactory {
         }
 
         public void upload(ModelStore store) {
+            store.ensureBiomeColourCapacity(this.biomeColourBuffer.size / 4);
             this.upload(store.modelBuffer, store.modelColourBuffer);
         }
 
         public void upload(GlBuffer modelBuffer, GlBuffer modelColourBuffer) {
-            this.biomeColourBuffer.cpyTo(UploadStream.INSTANCE.upload(modelColourBuffer, 0, this.biomeColourBuffer.size));
+            this.biomeColourBuffer.cpyTo(UploadStream.INSTANCE.upload(modelColourBuffer, BiomeBlendPalette.NORMAL_COLOUR_BASE * 4L, this.biomeColourBuffer.size));
 
             long ptr = this.modelBiomeIndexPairs.address;
             for (long offset = 0; offset < this.modelBiomeIndexPairs.size; offset += 8) {
@@ -969,12 +973,6 @@ public class ModelFactory {
             }
         }
 
-        if (this.modelsRequiringBiomeColours.size() * this.biomes.size()
-                > BiomeBlendPalette.PALETTE_BASE) {
-            this.blendPalette.disable();
-            Logger.error("Biome colour rows reached the blend palette boundary ("
-                    + BiomeBlendPalette.PALETTE_BASE + "); LOD biome blending disabled");
-        }
         this.blendPalette.mirrorRebuild(result.modelBiomeIndexPairs.address,
                 this.modelsRequiringBiomeColours.size(), result.biomeColourBuffer.address,
                 (int) (result.biomeColourBuffer.size / 4), this.biomes.size());

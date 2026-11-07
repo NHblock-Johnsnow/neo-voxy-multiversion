@@ -7,21 +7,10 @@ import net.minecraft.client.Minecraft;
 public final class SableShipContent {
     private SableShipContent() {}
 
-    private static java.lang.ref.WeakReference<net.minecraft.client.multiplayer.ClientLevel> cachedLevel = new java.lang.ref.WeakReference<>(null);
-    private static ClientSubLevelContainer cachedContainer;
-
     private static ClientSubLevelContainer container() {
         var level = Minecraft.getInstance().level;
-        if (level == null) {
-            cachedLevel = new java.lang.ref.WeakReference<>(null);
-            cachedContainer = null;
-            return null;
-        }
-        if (cachedLevel.get() != level) {
-            cachedLevel = new java.lang.ref.WeakReference<>(level);
-            cachedContainer = SubLevelContainer.getContainer(level);
-        }
-        return cachedContainer;
+        // 容器由世界持有，直接读取，避免静态容器反向保活已退出的世界。
+        return level == null ? null : SubLevelContainer.getContainer(level);
     }
 
     public static boolean inSubLevel(int chunkX, int chunkZ) {

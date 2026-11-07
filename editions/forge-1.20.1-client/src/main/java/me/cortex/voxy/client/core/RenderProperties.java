@@ -59,7 +59,8 @@ public record RenderProperties(boolean isZero2One, boolean isReverseZ, boolean u
 
     public static RenderProperties getRenderProperties() {
         RenderProperties properties = new RenderProperties(
-                true,
+                org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL45.GL_CLIP_DEPTH_MODE)
+                        == org.lwjgl.opengl.GL45.GL_ZERO_TO_ONE,
                 false,
                 false);
 

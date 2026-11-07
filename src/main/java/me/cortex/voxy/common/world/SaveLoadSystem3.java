@@ -12,7 +12,7 @@ public class SaveLoadSystem3 {
 
     private record SerializationCache(Long2ShortOpenHashMap lutMapCache, MemoryBuffer memoryBuffer) {
         public SerializationCache() {
-            this(new Long2ShortOpenHashMap(1024), ThreadLocalMemoryBuffer.create(WorldSection.SECTION_VOLUME*2+WorldSection.SECTION_VOLUME*8+1024));
+            this(new Long2ShortOpenHashMap(1024), ThreadLocalMemoryBuffer.create(WorldSection.SECTION_VOLUME*2+WorldSection.SECTION_VOLUME*8+1024+SurfaceDataCoverage.MAX_BYTES));
             this.lutMapCache.defaultReturnValue((short) -1);
         }
     }
@@ -35,8 +35,15 @@ public class SaveLoadSystem3 {
     private static final ThreadLocal<SerializationCache> CACHE = ThreadLocal.withInitial(SerializationCache::new);
 
     public static MemoryBuffer serialize(WorldSection section) {
+        synchronized (section) {
+            return serializeLocked(section);
+        }
+    }
+
+    private static MemoryBuffer serializeLocked(WorldSection section) {
         var cache = CACHE.get();
         var data = section._rawOrNull();
+        var coverage = section.getSurfaceData();
 
         Long2ShortOpenHashMap LUT = cache.lutMapCache; LUT.clear();
 
@@ -57,8 +64,10 @@ public class SaveLoadSystem3 {
             long uniformMetadata = 0;
             uniformMetadata |= 1L;//LUT size
             uniformMetadata |= Byte.toUnsignedLong(section.getNonEmptyChildren())<<16;
+            uniformMetadata |= SurfaceDataCodec.metadata(coverage);
             MemoryUtil.memPutLong(metadataPtr, uniformMetadata);
-            return buffer.subSize(ptr-buffer.address);
+            ptr = SurfaceDataCodec.write(ptr, coverage);
+            return buffer.subSize(ptr - buffer.address);
         }
 
         long blockPtr = ptr; ptr += WorldSection.SECTION_VOLUME*2;
@@ -82,14 +91,18 @@ public class SaveLoadSystem3 {
         long metadata = 0;
         metadata |= Integer.toUnsignedLong(LUT.size());//Bottom 2 bytes
         metadata |= Byte.toUnsignedLong(section.getNonEmptyChildren())<<16;//Next byte
-        //5 bytes free
+        // 下一字节保存表层数据格式。
 
+        metadata |= SurfaceDataCodec.metadata(coverage);
         MemoryUtil.memPutLong(metadataPtr, metadata);
 
-        return buffer.subSize(ptr-buffer.address);//Does not get freed
+        ptr = SurfaceDataCodec.write(ptr, coverage);
+
+        return buffer.subSize(ptr - buffer.address);//Does not get freed
     }
 
     public static boolean deserialize(WorldSection section, MemoryBuffer data) {
+        if (data.size < 16) return false;
         long ptr = data.address;
         long key = MemoryUtil.memGetLong(ptr); ptr += 8;
 
@@ -99,10 +112,21 @@ public class SaveLoadSystem3 {
         }
 
         final long metadata = MemoryUtil.memGetLong(ptr); ptr += 8;
+        SurfaceDataCodec.tag(metadata);
+        if (data.size < 16L + WorldSection.SECTION_VOLUME * 2L + 8L) return false;
+        final int lutSize = (int) (metadata & 0xFFFF);
+        if (lutSize < 1 || lutSize > WorldSection.SECTION_VOLUME) return false;
+        long lutEnd = data.address + 16L + WorldSection.SECTION_VOLUME * 2L + lutSize * 8L;
+        SurfaceDataCoverage coverage;
+        try {
+            coverage = SurfaceDataCodec.read(metadata, section.lvl, lutEnd, data.address + data.size);
+        } catch (IllegalArgumentException invalid) {
+            Logger.error("Invalid surface data in section " + section.key + ": " + invalid.getMessage());
+            return false;
+        }
         section.nonEmptyChildren = (byte) ((metadata>>>16)&0xFF);
         final long lutBasePtr = ptr + WorldSection.SECTION_VOLUME * 2;
 
-        final int lutSize = (int) (metadata & 0xFFFF);
         if (lutSize == 1) {
             long value = MemoryUtil.memGetLong(lutBasePtr);
             section.setUniform(value);
@@ -110,12 +134,16 @@ public class SaveLoadSystem3 {
                 section.nonEmptyBlockCount = Mapper.isAir(value) ? 0 : WorldSection.SECTION_VOLUME;
             }
             me.cortex.voxy.commonImpl.PerfStats.sectionUniformKept.increment();
+            section.legacySurfaceSource = section.lvl == 0 && coverage.mode() == 0;
+            section.surfaceData = coverage;
             return true;
         }
 
         final var blockData = section.materialize();
         for (int i = 0; i < WorldSection.SECTION_VOLUME; i++) {
-            blockData[i] = MemoryUtil.memGetLong(lutBasePtr + Short.toUnsignedLong(MemoryUtil.memGetShort(ptr)) * 8L);ptr += 2;
+            int index = Short.toUnsignedInt(MemoryUtil.memGetShort(ptr));
+            if (index >= lutSize) return false;
+            blockData[i] = MemoryUtil.memGetLong(lutBasePtr + index * 8L); ptr += 2;
         }
 
         if (section.lvl == 0) {
@@ -127,6 +155,8 @@ public class SaveLoadSystem3 {
         }
 
         ptr = lutBasePtr + (metadata & 0xFFFF) * 8L;
+        section.legacySurfaceSource = section.lvl == 0 && coverage.mode() == 0;
+        section.surfaceData = coverage;
         return true;
     }
 }

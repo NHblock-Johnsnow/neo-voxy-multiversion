@@ -9,7 +9,7 @@ public final class ClientChunkRecovery {
 
     public static LevelChunk find(WorldIdentifier id, int chunkX, int chunkZ) {
         var level = Minecraft.getInstance().level;
-        if (level == null || !level.dimension().equals(id.key)) {
+        if (level == null || id == null || !id.equals(WorldIdentifier.of(level))) {
             return null;
         }
         return ((ICheekyClientChunkCache) level.getChunkSource()).voxy$cheekyGetChunk(chunkX, chunkZ);

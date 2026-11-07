@@ -254,7 +254,6 @@ public class WorldConversionFactory {
                     data[i] = Mapper.airWithLight(lightSupplier.supply(i&0xF, (i>>8)&0xF, (i>>4)&0xF));
                 }
             } else {
-                nonZeroCnt = 4096;
                 BlockState voxelState = null;
                 if (hasVariantMappings) {
                     try { voxelState = vp.valueFor(0); } catch (Throwable ignored) {}
@@ -271,6 +270,7 @@ public class WorldConversionFactory {
                         if (framedBlockIds != null) { int m = framedBlockIds[i]; if (m != 0) mappedBlockId = m; }
                         if (littleTilesHolders != null && (littleTilesHolders[i >>> 6] & (1L << (i & 63))) != 0) mappedBlockId = 0;
                     }
+                    nonZeroCnt += mappedBlockId != 0 ? 1 : 0;
                     data[i] = Mapper.composeMappingId(light, mappedBlockId, biomes[Integer.compress(i,0b1100_1100_1100)]);
                 }
             }

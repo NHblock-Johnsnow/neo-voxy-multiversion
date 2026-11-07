@@ -5,7 +5,6 @@ import com.sun.jna.platform.win32.WinNT.PROCESSOR_RELATIONSHIP;
 import com.sun.jna.platform.win32.WinNT.SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import java.util.Arrays;
-import java.util.Random;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.ThreadUtils;
 import org.lwjgl.system.Platform;
@@ -152,29 +151,6 @@ public class CpuLayout {
       });
    }
 
-   public static void main(String[] args) throws InterruptedException {
-      System.err.println(Arrays.toString((Object[])CORES));
-      setThreadAffinity(CORES[0], CORES[1]);
-
-      for (int i = 0; i < 20; i++) {
-         int finalI = i;
-         new Thread(() -> {
-            setThreadAffinity(CORES[finalI & 3]);
-            Random r = new Random();
-            int j = 0;
-
-            while (r.nextLong() != 0L) {
-               j++;
-            }
-
-            System.out.println(j);
-         }).start();
-      }
-
-      while (true) {
-         Thread.sleep(100L);
-      }
-   }
 
    public static int getCoreCount() {
       return CORES == null ? Runtime.getRuntime().availableProcessors() : CORES.length;

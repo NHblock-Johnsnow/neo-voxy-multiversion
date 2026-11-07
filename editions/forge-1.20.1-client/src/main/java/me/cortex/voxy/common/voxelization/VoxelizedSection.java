@@ -10,8 +10,14 @@ public class VoxelizedSection {
     public int z;
     public int lvl0NonAirCount;
     public final long[] section;
+    private long[] mipScratch;
     public VoxelizedSection(long[] section) {
         this.section = section;
+    }
+
+    long[] mipScratch() {
+        if (this.mipScratch == null) this.mipScratch = new long[512 + 64 + 8];
+        return this.mipScratch;
     }
 
     public static int getBaseIndexForLevel(int lvl) {

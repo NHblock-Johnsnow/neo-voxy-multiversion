@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core;
 
+import me.cortex.voxy.common.util.ExceptionCleanup;
+
 import com.mojang.blaze3d.platform.GlConst;
 import com.mojang.blaze3d.platform.GlStateManager;
 import com.mojang.blaze3d.systems.RenderSystem;
@@ -64,14 +66,12 @@ public class VoxyRenderSystem {
     private static final int[] TOP_LEVEL_NODE_PROCESS_RATE = {4, 8, 12, 24, 40};
     private final WorldEngine worldIn;
 
-
     private final ModelBakerySubsystem modelService;
     private final RenderGenerationService renderGen;
     private final IGeometryData geometryData;
     private final AsyncNodeManager nodeManager;
     private final NodeCleaner nodeCleaner;
     private final HierarchicalOcclusionTraverser traversal;
-
 
     private final RenderDistanceTracker renderDistanceTracker;
     public final ChunkBoundRenderer chunkBoundRenderer;
@@ -114,9 +114,8 @@ public class VoxyRenderSystem {
     }
 
     public VoxyRenderSystem(WorldEngine world, ServiceManager sm) {
-        //Keep the world loaded, NOTE: this is done FIRST, to keep and ensure that even if the rest of loading takes more
-        // than timeout, we keep the world acquired
-        world.acquireRef();
+        // 引用在进入资源创建前取得，失败时统一归还。
+        this.worldIn = world;
         Logger.info("Creating Voxy render system");
 
         System.gc();
@@ -133,12 +132,13 @@ public class VoxyRenderSystem {
             oldBufferBindings[i] = glGetIntegeri(GL_SHADER_STORAGE_BUFFER_BINDING, i);
         }
 
+        GlBuffer borrowedGeometry = null;
+        world.acquireRef();
         try {
+
             //wait for opengl to be finished, this should hopefully ensure all memory allocations are free
             glFinish();
             glFinish();
-
-            this.worldIn = world;
 
             this.properties = RenderProperties.getRenderProperties();
             var backendFactory = getRenderBackendFactory();
@@ -146,7 +146,8 @@ public class VoxyRenderSystem {
                 this.modelService = new ModelBakerySubsystem(world.getMapper());
                 this.renderGen = new RenderGenerationService(world, this.modelService, sm, IUsesMeshlets.class.isAssignableFrom(backendFactory.clz()));
 
-                this.geometryData = new BasicSectionGeometryData(1<<20, RenderResourceReuse.getOrCreateGeometryBuffer());
+                borrowedGeometry = RenderResourceReuse.getOrCreateGeometryBuffer();
+                this.geometryData = new BasicSectionGeometryData(1<<20, borrowedGeometry);
 
                 this.nodeManager = new AsyncNodeManager(1 << 21, this.geometryData, this.renderGen);
                 this.nodeCleaner = new NodeCleaner(this.nodeManager);
@@ -165,7 +166,6 @@ public class VoxyRenderSystem {
 
             //Late stage traversal compile for shaders with taa
             this.traversal.lateStageCompile(this.pipeline);
-
 
             var sectionRenderer = backendFactory.create(this.pipeline, this.modelService.getStore(), this.geometryData);
             this.pipeline.setSectionRenderer(sectionRenderer);
@@ -193,13 +193,19 @@ public class VoxyRenderSystem {
             this.chunkBoundRenderer = new ChunkBoundRenderer(this.pipeline);
 
             Logger.info("Voxy render system created with " + this.geometryData.getMaxCapacity() + " geometry capacity, using pipeline '" + this.pipeline.getClass().getSimpleName() + "' with renderer '" + sectionRenderer.getClass().getSimpleName() + "'");
-        } catch (RuntimeException e) {
-            world.releaseRef();//If something goes wrong, we must release the world first
-            throw e;
-        }
 
-        for (int i = 0; i < oldBufferBindings.length; i++) {
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, i, oldBufferBindings[i]);
+            this.restoreConstructorBindings(oldBufferBindings);
+        } catch (RuntimeException | Error failure) {
+            var cleanup = new ExceptionCleanup(failure);
+            this.releaseResources(cleanup, borrowedGeometry);
+            cleanup.run(() -> this.restoreConstructorBindings(oldBufferBindings));
+            throw failure;
+        }
+    }
+
+    private void restoreConstructorBindings(int[] bindings) {
+        for (int i = 0; i < bindings.length; i++) {
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, i, bindings[i]);
         }
 
         for (int i = 0; i < 12; i++) {
@@ -208,7 +214,6 @@ public class VoxyRenderSystem {
             glBindSampler(i, 0);
         }
     }
-
 
     public Viewport<?> setupViewport(Matrix4fc vanillaProjection, Matrix4fc modelView, double cameraX, double cameraY, double cameraZ) {
         var viewport = this.getViewport();
@@ -284,7 +289,6 @@ public class VoxyRenderSystem {
             oldBufferBindings[i] = glGetIntegeri(GL_SHADER_STORAGE_BUFFER_BINDING, i);
         }
 
-
         int oldFB = GL11.glGetInteger(GL_DRAW_FRAMEBUFFER_BINDING);
         int boundFB = oldFB;
 
@@ -303,6 +307,8 @@ public class VoxyRenderSystem {
 
         this.pipeline.preSetup(viewport);
 
+        // 遮挡深度的清除和光栅写入都需要显式开启写掩码。
+        GlStateManager._depthMask(true);
         TimingStatistics.E.start();
         if ((!VoxyClient.disableSodiumChunkRender())&&!IrisUtil.irisShadowActive()) {
             this.chunkBoundRenderer.render(viewport);
@@ -311,13 +317,11 @@ public class VoxyRenderSystem {
         }
         TimingStatistics.E.stop();
 
-
         GPUTiming.INSTANCE.marker();
         //The entire rendering pipeline (excluding the chunkbound thing)
         this.modelService.drainBlendPalette();
         this.pipeline.runPipeline(viewport, boundFB, dims[2], dims[3]);
         GPUTiming.INSTANCE.marker();
-
 
         TimingStatistics.main.stop();
         TimingStatistics.postDynamic.start();
@@ -382,7 +386,6 @@ public class VoxyRenderSystem {
 
         this.renderer.renderFarAwayOpaque(viewport, this.chunkBoundRenderer.getDepthBoundTexture());
 
-
         TimingStatistics.F.start();
         //Compute the SSAO of the rendered terrain, TODO: fix it breaking depth or breaking _something_ am not sure what
         this.postProcessing.computeSSAO(viewport.MVP);
@@ -392,7 +395,6 @@ public class VoxyRenderSystem {
         //We can render the translucent directly after as it is the furthest translucent objects
         this.renderer.renderFarAwayTranslucent(viewport, this.chunkBoundRenderer.getDepthBoundTexture());
         TimingStatistics.G.stop();
-
 
         TimingStatistics.F.start();
         this.postProcessing.renderPost(viewport, matrices.projection(), boundFB);
@@ -413,8 +415,6 @@ public class VoxyRenderSystem {
     private int getTopLevelNodeProcessRate() {
         return TOP_LEVEL_NODE_PROCESS_RATE[VoxyConfig.CONFIG.getRenderPressureLevel()];
     }
-
-
 
     private void autoBalanceSubDivSize() {
         //only increase quality while there are very few mesh queues, this stops,
@@ -545,41 +545,45 @@ public class VoxyRenderSystem {
     }
 
     public void shutdown() {
-        Logger.info("Flushing download stream");
-        DownloadStream.INSTANCE.flushWaitClear();
         Logger.info("Shutting down rendering");
+        var cleanup = new ExceptionCleanup(null);
+        var geometry = (BasicSectionGeometryData)this.geometryData;
+        this.releaseResources(cleanup, geometry.isExternalGeometryBuffer ? geometry.getGeometryBuffer() : null);
         try {
-            //Cleanup callbacks
-            this.worldIn.setDirtyCallback(null);
-            this.worldIn.getMapper().setBiomeCallback(null);
-            this.worldIn.getMapper().setStateCallback(null);
-
-            this.nodeManager.stop();
-
-            this.modelService.shutdown();
-            this.renderGen.shutdown();
-            this.traversal.free();
-            this.nodeCleaner.free();
-            this.geometryData.free();
-            if (((BasicSectionGeometryData)this.geometryData).isExternalGeometryBuffer) {
-                RenderResourceReuse.giveBackGeometryBuffer(((BasicSectionGeometryData)this.geometryData).getGeometryBuffer());
-            }
-
-            this.chunkBoundRenderer.free();
-
-            this.viewportSelector.free();
-        } catch (Exception e) {Logger.error("Error shutting down renderer components", e);}
-        Logger.info("Shutting down render pipeline");
-        try {this.pipeline.free();} catch (Exception e){Logger.error("Error releasing render pipeline", e);}
-
-
-
-        Logger.info("Flushing download stream");
-        DownloadStream.INSTANCE.flushWaitClear();
-
-        //Release hold on the world
-        this.worldIn.releaseRef();
+            cleanup.rethrow();
+        } catch (RuntimeException | Error failure) {
+            Logger.error("Error shutting down renderer components", failure);
+        }
         Logger.info("Render shutdown completed");
+    }
+
+    private void releaseResources(ExceptionCleanup cleanup, GlBuffer borrowedGeometry) {
+        boolean interrupted = Thread.interrupted();
+        try {
+            cleanup.run(() -> this.worldIn.setDirtyCallback(null));
+            cleanup.run(() -> this.worldIn.getMapper().setBiomeCallback(null));
+            cleanup.run(() -> this.worldIn.getMapper().setStateCallback(null));
+            cleanup.run(() -> DownloadStream.INSTANCE.flushWaitClear());
+            if (this.nodeManager != null) {
+                cleanup.run(() -> this.nodeManager.stop(this.renderGen::shutdown));
+            } else if (this.renderGen != null) {
+                cleanup.run(this.renderGen::shutdown);
+            }
+            interrupted |= Thread.interrupted();
+            if (this.modelService != null) cleanup.run(this.modelService::shutdown);
+            interrupted |= Thread.interrupted();
+            cleanup.run(() -> DownloadStream.INSTANCE.flushWaitClear());
+            if (this.chunkBoundRenderer != null) cleanup.run(this.chunkBoundRenderer::free);
+            if (this.viewportSelector != null) cleanup.run(this.viewportSelector::free);
+            if (this.pipeline != null) cleanup.run(this.pipeline::free);
+            if (this.traversal != null) cleanup.run(this.traversal::free);
+            if (this.nodeCleaner != null) cleanup.run(this.nodeCleaner::free);
+            if (this.geometryData != null) cleanup.run(this.geometryData::free);
+            if (borrowedGeometry != null) cleanup.run(() -> RenderResourceReuse.giveBackGeometryBuffer(borrowedGeometry));
+            cleanup.run(this.worldIn::releaseRef);
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
+        }
     }
 
     public WorldEngine getEngine() {

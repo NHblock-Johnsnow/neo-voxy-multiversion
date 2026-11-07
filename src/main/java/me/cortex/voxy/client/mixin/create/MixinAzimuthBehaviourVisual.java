@@ -19,6 +19,7 @@ public abstract class MixinAzimuthBehaviourVisual {
 
     @Inject(method = "<init>", at = @At("TAIL"), require = 0)
     private void voxy$register(CallbackInfo ci) {
-        me.cortex.voxy.client.compat.create.AzimuthBehaviourIndex.register(this.parentVisual, this::collectCrumblingInstances);
+        me.cortex.voxy.client.compat.create.AzimuthBehaviourIndex.register(
+                this.parentVisual, this, MixinAzimuthBehaviourVisual::collectCrumblingInstances);
     }
 }

@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core.model;
 
+import me.cortex.voxy.common.util.ExceptionCleanup;
+
 
 import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
 import me.cortex.voxy.client.VoxyClient;
@@ -43,9 +45,9 @@ public class ModelBakerySubsystem {
                 this.processingThreadException = e;
             });
             this.processingThread.start();
-        } catch (RuntimeException | Error e) {
-            this.storage.free();
-            throw e;
+        } catch (RuntimeException | Error failure) {
+            this.releaseResources(new ExceptionCleanup(failure));
+            throw failure;
         }
     }
 
@@ -62,17 +64,31 @@ public class ModelBakerySubsystem {
     }
 
     public void shutdown() {
-        this.isRunning = false;
-        this.processingThread.interrupt();
-        LockSupport.unpark(this.processingThread);
-        try {
-            this.processingThread.join();
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        }
+        var cleanup = new ExceptionCleanup(null);
+        this.releaseResources(cleanup);
+        cleanup.rethrow();
+    }
 
-        this.factory.free();
-        this.storage.free();
+    private void releaseResources(ExceptionCleanup cleanup) {
+        this.isRunning = false;
+        boolean interrupted = Thread.interrupted();
+        try {
+            if (this.processingThread != null) {
+                this.processingThread.interrupt();
+                while (this.processingThread.isAlive()) {
+                    LockSupport.unpark(this.processingThread);
+                    try {
+                        this.processingThread.join();
+                    } catch (InterruptedException failure) {
+                        interrupted = true;
+                    }
+                }
+            }
+            if (this.factory != null) cleanup.run(this.factory::free);
+            cleanup.run(this.storage::free);
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
+        }
     }
 
     //This is on this side only and done like this as only worker threads call this code

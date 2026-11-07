@@ -23,6 +23,23 @@ public final class DistantMeshBuilder {
     private final Vector4f scratch = new Vector4f();
     private final org.joml.Vector3f normalScratch = new org.joml.Vector3f();
     private final RandomSource random = RandomSource.create(42);
+    private int markedPosition, markedVertices;
+    private float markedMinX, markedMinY, markedMinZ, markedMaxX, markedMaxY, markedMaxZ;
+
+    // 单层检查点；失败模型的半个四边形不能串入下一个方块。
+    public void mark() {
+        this.markedPosition = this.buffer.position();
+        this.markedVertices = this.vertexCount;
+        this.markedMinX = this.minX; this.markedMinY = this.minY; this.markedMinZ = this.minZ;
+        this.markedMaxX = this.maxX; this.markedMaxY = this.maxY; this.markedMaxZ = this.maxZ;
+    }
+
+    public void rollback() {
+        this.buffer.position(this.markedPosition);
+        this.vertexCount = this.markedVertices;
+        this.minX = this.markedMinX; this.minY = this.markedMinY; this.minZ = this.markedMinZ;
+        this.maxX = this.markedMaxX; this.maxY = this.markedMaxY; this.maxZ = this.markedMaxZ;
+    }
 
     public DistantMeshBuilder() {
         this(true);
@@ -288,6 +305,13 @@ public final class DistantMeshBuilder {
         cpu.lod = this.allowLod ? DistantMeshLod.build(this.buffer, quadCount) : DistantMeshLod.EMPTY;
         cpu.minX = this.minX; cpu.minY = this.minY; cpu.minZ = this.minZ;
         cpu.maxX = this.maxX; cpu.maxY = this.maxY; cpu.maxZ = this.maxZ;
+        if (cpu.lod.vertices == null && cpu.lod.grids.length != 0) {
+            // 平面 LOD 向下吸附；构建时一次扩展边界，覆盖各级及其过渡。
+            float grid = cpu.lod.grids[cpu.lod.grids.length - 1];
+            cpu.minX = DistantMeshLod.snap(cpu.minX, grid);
+            cpu.minY = DistantMeshLod.snap(cpu.minY, grid);
+            cpu.minZ = DistantMeshLod.snap(cpu.minZ, grid);
+        }
         //Ownership moves to the CpuMesh - discard() must not free it from under the new owner
         this.buffer = null;
         return cpu;

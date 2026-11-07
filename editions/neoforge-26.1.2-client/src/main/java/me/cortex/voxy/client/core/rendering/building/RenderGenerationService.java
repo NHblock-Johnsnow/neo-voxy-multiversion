@@ -1,5 +1,6 @@
 package me.cortex.voxy.client.core.rendering.building;
 
+import me.cortex.voxy.common.util.ExceptionCleanup;
 import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import java.util.List;
@@ -231,51 +232,31 @@ public class RenderGenerationService {
    }
 
    public void shutdown() {
-      while (this.service.numJobs() != 0) {
-         int i = this.service.drain();
-         if (i != 0) {
-            long stamp = this.taskMapLock.writeLock();
-
-            for (int j = 0; j < i; j++) {
-               RenderGenerationService.BuildTask task = this.taskQueue.remove();
-               if (task.section != null) {
-                  task.section.release();
+      var cleanup = new ExceptionCleanup(null);
+      // 先停止调度并等待在途任务，剩余队列只需清理一遍。
+      cleanup.run(this.service::shutdown);
+      long stamp = this.taskMapLock.writeLock();
+      try {
+          BuildTask task;
+          while ((task = this.taskQueue.poll()) != null) {
+              this.taskQueueCount.decrementAndGet();
+              if (task.section != null) {
+                  var section = task.section;
+                  task.section = null;
                   this.holdingSectionCount.decrementAndGet();
-               }
-
-               if (this.taskMap.remove(task.position) != task) {
-                  throw new IllegalStateException();
-               }
-            }
-
-            this.taskMapLock.unlockWrite(stamp);
-            this.taskQueueCount.addAndGet(-i);
-            continue;
-         }
-         break;
+                  cleanup.run(section::release);
+              }
+              if (this.taskMap.remove(task.position) != task) {
+                  cleanup.run(() -> { throw new IllegalStateException("Mesh task map mismatch"); });
+              }
+          }
+          if (this.taskQueueCount.get() != 0 || !this.taskMap.isEmpty() || this.holdingSectionCount.get() != 0) {
+              cleanup.run(() -> { throw new IllegalStateException("Mesh task cleanup incomplete"); });
+          }
+      } finally {
+          this.taskMapLock.unlockWrite(stamp);
       }
-
-      this.service.shutdown();
-
-      while (!this.taskQueue.isEmpty()) {
-         RenderGenerationService.BuildTask taskx = this.taskQueue.remove();
-         this.taskQueueCount.decrementAndGet();
-         if (taskx.section != null) {
-            taskx.section.release();
-            this.holdingSectionCount.decrementAndGet();
-         }
-
-         long stamp = this.taskMapLock.writeLock();
-         if (this.taskMap.remove(taskx.position) != taskx) {
-            throw new IllegalStateException();
-         }
-
-         this.taskMapLock.unlockWrite(stamp);
-      }
-
-      if (this.taskQueueCount.get() != 0) {
-         throw new IllegalStateException();
-      }
+      cleanup.rethrow();
    }
 
    public void addDebugData(List<String> debug) {
