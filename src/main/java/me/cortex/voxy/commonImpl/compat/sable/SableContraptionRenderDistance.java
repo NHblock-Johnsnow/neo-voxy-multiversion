@@ -23,10 +23,11 @@ public final class SableContraptionRenderDistance {
     private static final int DEFAULT_MAX_CHUNKS = 0;
     private static final double DEDICATED_SERVER_FALLBACK_BLOCKS = 2048.0;
 
-    private static final ConfigSnapshot DISABLED_CONFIG = new ConfigSnapshot(false, 0.0, DEFAULT_MAX_CHUNKS);
+    private static final ConfigSnapshot DISABLED_CONFIG = new ConfigSnapshot(false, 0.0, DEFAULT_MAX_CHUNKS, false, 32, 4);
 
     private static ConfigSnapshot cachedConfig = DISABLED_CONFIG;
     private static volatile ConfigSnapshot runtimeClientConfig;
+    private static volatile ServerLoadConfig serverLoadConfig = new ServerLoadConfig(false, 32, 4);
     private static long lastConfigRefreshTick = Long.MIN_VALUE;
     private static String cachedConfigSource;
     private static boolean configLoaded;
@@ -76,13 +77,50 @@ public final class SableContraptionRenderDistance {
         return Math.max(0, level.getServer().getPlayerList().getViewDistance());
     }
 
-    public static void updateClientConfig(boolean enabled, double sectionRenderDistance, int aeronauticsContraptionMaxChunks) {
+    public static void updateClientConfig(boolean enabled, double sectionRenderDistance, int aeronauticsContraptionMaxChunks,
+                                          boolean sableLodForceLoading, int sableLodLoadDistanceChunks, int sableLodLoadBudget) {
         if (!enabled || !Double.isFinite(sectionRenderDistance) || sectionRenderDistance <= 0.0) {
-            runtimeClientConfig = new ConfigSnapshot(false, 0.0, aeronauticsContraptionMaxChunks);
+            runtimeClientConfig = new ConfigSnapshot(false, 0.0, aeronauticsContraptionMaxChunks, false,
+                    clampLoadDistance(sableLodLoadDistanceChunks), clampLoadBudget(sableLodLoadBudget));
             return;
         }
 
-        runtimeClientConfig = new ConfigSnapshot(true, sectionRenderDistance, aeronauticsContraptionMaxChunks);
+        runtimeClientConfig = new ConfigSnapshot(true, sectionRenderDistance, aeronauticsContraptionMaxChunks,
+                sableLodForceLoading, clampLoadDistance(sableLodLoadDistanceChunks), clampLoadBudget(sableLodLoadBudget));
+    }
+
+    public static void updateServerConfig(boolean forceLoading, int loadDistanceChunks, int loadBudget) {
+        serverLoadConfig = new ServerLoadConfig(forceLoading, clampLoadDistance(loadDistanceChunks), clampLoadBudget(loadBudget));
+    }
+
+    public record LoadPolicy(double rangeBlocks, int requestsPerTick) {
+    }
+
+    public static LoadPolicy getLoadPolicy(ServerLevel level) {
+        boolean forceLoading;
+        int distanceChunks;
+        int budget;
+        if (level.getServer().isDedicatedServer()) {
+            ServerLoadConfig config = serverLoadConfig;
+            forceLoading = config.forceLoading();
+            distanceChunks = config.distanceChunks();
+            budget = config.budget();
+        } else {
+            ConfigSnapshot config = runtimeClientConfig;
+            if (config == null) config = getConfig(level.getGameTime());
+            forceLoading = config.enabled() && config.forceLoading();
+            distanceChunks = config.loadDistanceChunks();
+            budget = config.loadBudget();
+        }
+        return new LoadPolicy(forceLoading ? Math.min(getRangeBlocks(level), distanceChunks * 16.0) : 0.0, budget);
+    }
+
+    private static int clampLoadDistance(int chunks) {
+        return Math.max(8, Math.min(192, chunks));
+    }
+
+    private static int clampLoadBudget(int budget) {
+        return Math.max(1, Math.min(64, budget));
     }
 
     private static double getDedicatedServerRangeBlocks(long gameTime) {
@@ -147,7 +185,7 @@ public final class SableContraptionRenderDistance {
 
     private static ConfigSnapshot loadConfig(String source) {
         if (source == null) {
-            return new ConfigSnapshot(true, DEFAULT_SECTION_RENDER_DISTANCE, DEFAULT_MAX_CHUNKS);
+            return new ConfigSnapshot(true, DEFAULT_SECTION_RENDER_DISTANCE, DEFAULT_MAX_CHUNKS, false, 32, 4);
         }
 
         try {
@@ -156,12 +194,15 @@ public final class SableContraptionRenderDistance {
                     && getBoolean(root, "sable_lod_rendering", true);
             double sectionRenderDistance = getDouble(root, "section_render_distance", DEFAULT_SECTION_RENDER_DISTANCE);
             int aeronauticsContraptionMaxChunks = getInt(root, "aeronautics_contraption_max_chunks", DEFAULT_MAX_CHUNKS);
+            boolean forceLoading = getBoolean(root, "sable_lod_force_loading", false);
+            int loadDistance = clampLoadDistance(getInt(root, "sable_lod_load_distance_chunks", 32));
+            int loadBudget = clampLoadBudget(getInt(root, "sable_lod_load_budget", 4));
 
             if (!enabled || !Double.isFinite(sectionRenderDistance) || sectionRenderDistance <= 0.0) {
-                return new ConfigSnapshot(false, 0.0, aeronauticsContraptionMaxChunks);
+                return new ConfigSnapshot(false, 0.0, aeronauticsContraptionMaxChunks, false, loadDistance, loadBudget);
             }
 
-            return new ConfigSnapshot(true, sectionRenderDistance, aeronauticsContraptionMaxChunks);
+            return new ConfigSnapshot(true, sectionRenderDistance, aeronauticsContraptionMaxChunks, forceLoading, loadDistance, loadBudget);
         } catch (Exception e) {
             Logger.error("Failed to load Voxy config for Sable simulated contraption render distance", e);
             return DISABLED_CONFIG;
@@ -192,7 +233,13 @@ public final class SableContraptionRenderDistance {
     private record ConfigSnapshot(
             boolean enabled,
             double sectionRenderDistance,
-            int aeronauticsContraptionMaxChunks
+            int aeronauticsContraptionMaxChunks,
+            boolean forceLoading,
+            int loadDistanceChunks,
+            int loadBudget
     ) {
+    }
+
+    private record ServerLoadConfig(boolean forceLoading, int distanceChunks, int budget) {
     }
 }

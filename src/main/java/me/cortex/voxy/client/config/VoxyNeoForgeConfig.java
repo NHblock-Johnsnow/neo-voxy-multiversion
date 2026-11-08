@@ -116,6 +116,28 @@ public class VoxyNeoForgeConfig {
                      "Displays LOD traversal counts, visible sections, and quad counts")
             .define("renderStatistics", false);
 
+    private static final ModConfigSpec.BooleanValue SABLE_LOD_RENDERING = BUILDER
+            .comment("Render loaded Sable structures beyond vanilla view distance.")
+            .define("sableLodRendering", true);
+
+    private static final ModConfigSpec.IntValue SABLE_LOD_MAX_CHUNKS = BUILDER
+            .comment("Sable display distance in chunks. 0 follows the LOD radius.")
+            .defineInRange("aeronauticsContraptionMaxChunks", 0, 0, 192);
+
+    private static final ModConfigSpec.BooleanValue SABLE_LOD_FORCE_LOADING = BUILDER
+            .comment("Keep distant Sable structures loaded in single-player. Increases loading and simulation work.",
+                     "Disabled by default. Dedicated servers use voxy-server.toml instead.")
+            .define("sableLodForceLoading", false);
+
+    private static final ModConfigSpec.IntValue SABLE_LOD_LOAD_DISTANCE_CHUNKS = BUILDER
+            .comment("Single-player Sable active-loading radius in chunks, capped by display distance.")
+            .defineInRange("sableLodLoadDistanceChunks", 32, 8, 192);
+
+    private static final ModConfigSpec.IntValue SABLE_LOD_LOAD_BUDGET = BUILDER
+            .comment("New Sable ticket and holding-chunk load requests per tick per dimension in single-player.",
+                     "Limits new requests, not total loaded structures or their simulation cost.")
+            .defineInRange("sableLodLoadBudget", 4, 1, 64);
+
     private static final ModConfigSpec.BooleanValue DISTANT_TRAINS = BUILDER
             .comment("Render Create trains beyond the vanilla view distance, in the LOD")
             .define("distantTrains", true);
@@ -230,6 +252,11 @@ public class VoxyNeoForgeConfig {
         VoxyConfig.CONFIG.enableExtendedRequestDistance = ENABLE_EXTENDED_REQUEST_DISTANCE.get();
         VoxyConfig.CONFIG.requestDistance = REQUEST_DISTANCE.get();
         VoxyConfig.CONFIG.earthCurveRatio = EARTH_CURVE_RATIO.get();
+        VoxyConfig.CONFIG.sableLodRendering = SABLE_LOD_RENDERING.get();
+        VoxyConfig.CONFIG.aeronauticsContraptionMaxChunks = SABLE_LOD_MAX_CHUNKS.get();
+        VoxyConfig.CONFIG.sableLodForceLoading = SABLE_LOD_FORCE_LOADING.get();
+        VoxyConfig.CONFIG.sableLodLoadDistanceChunks = SABLE_LOD_LOAD_DISTANCE_CHUNKS.get();
+        VoxyConfig.CONFIG.sableLodLoadBudget = SABLE_LOD_LOAD_BUDGET.get();
         VoxyConfig.CONFIG.distantTrains = DISTANT_TRAINS.get();
         VoxyConfig.CONFIG.distantTrainMaxChunks = DISTANT_TRAIN_MAX_CHUNKS.get();
         VoxyConfig.CONFIG.distantTracks = DISTANT_TRACKS.get();
@@ -281,6 +308,11 @@ public class VoxyNeoForgeConfig {
         ENABLE_EXTENDED_REQUEST_DISTANCE.set(VoxyConfig.CONFIG.enableExtendedRequestDistance);
         REQUEST_DISTANCE.set(VoxyConfig.CONFIG.requestDistance);
         EARTH_CURVE_RATIO.set(VoxyConfig.CONFIG.earthCurveRatio);
+        SABLE_LOD_RENDERING.set(VoxyConfig.CONFIG.sableLodRendering);
+        SABLE_LOD_MAX_CHUNKS.set(VoxyConfig.CONFIG.aeronauticsContraptionMaxChunks);
+        SABLE_LOD_FORCE_LOADING.set(VoxyConfig.CONFIG.sableLodForceLoading);
+        SABLE_LOD_LOAD_DISTANCE_CHUNKS.set(VoxyConfig.CONFIG.sableLodLoadDistanceChunks);
+        SABLE_LOD_LOAD_BUDGET.set(VoxyConfig.CONFIG.sableLodLoadBudget);
         DISTANT_TRAINS.set(VoxyConfig.CONFIG.distantTrains);
         DISTANT_TRAIN_MAX_CHUNKS.set(VoxyConfig.CONFIG.distantTrainMaxChunks);
         DISTANT_TRACKS.set(VoxyConfig.CONFIG.distantTracks);

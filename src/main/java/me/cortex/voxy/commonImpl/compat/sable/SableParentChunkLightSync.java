@@ -4,6 +4,7 @@ import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.companion.math.BoundingBox3dc;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
+import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongIterator;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
@@ -46,8 +47,10 @@ public final class SableParentChunkLightSync {
     }
 
     private static final Map<ServerLevel, Map<TrackingKey, TrackingState>> STATE = new WeakHashMap<>();
+    //Count subscriptions across player/structure pairs, including naturally loaded structures.
+    private static final Map<ServerLevel, Long2IntOpenHashMap> SUBSCRIPTIONS = new WeakHashMap<>();
     //chunkLong -> gameTime of the last block or light change, fed by the ChunkHolder hook. Bounded by
-    //the sable ticket footprint (markDirty filters on it) and pruned on the refresh cadence.
+    //the sent footprint and pruned on the refresh cadence or the final unsubscribe.
     private static final Map<ServerLevel, Long2LongOpenHashMap> DIRTY = new WeakHashMap<>();
 
     private static boolean unavailable;
@@ -60,7 +63,8 @@ public final class SableParentChunkLightSync {
             return;
         }
         long chunk = pos.toLong();
-        if (!SableLodChunkManager.isActiveLodChunk(level, chunk)) {
+        Long2IntOpenHashMap subscriptions = SUBSCRIPTIONS.get(level);
+        if (subscriptions == null || !subscriptions.containsKey(chunk)) {
             return;
         }
         DIRTY.computeIfAbsent(level, ignored -> new Long2LongOpenHashMap()).put(chunk, level.getGameTime());
@@ -68,6 +72,7 @@ public final class SableParentChunkLightSync {
 
     public static void onLevelClosed(ServerLevel level) {
         STATE.remove(level);
+        SUBSCRIPTIONS.remove(level);
         DIRTY.remove(level);
     }
 
@@ -77,16 +82,14 @@ public final class SableParentChunkLightSync {
         }
         if (level.players().isEmpty()) {
             //Nothing to send, and keys left behind would hold dead ServerPlayer references
-            STATE.remove(level);
-            DIRTY.remove(level);
+            onLevelClosed(level);
             return;
         }
 
         try {
             ServerSubLevelContainer container = SubLevelContainer.getContainer(level);
             if (container == null) {
-                STATE.remove(level);
-                DIRTY.remove(level);
+                onLevelClosed(level);
                 return;
             }
 
@@ -138,19 +141,25 @@ public final class SableParentChunkLightSync {
                 }
             }
 
-            states.keySet().removeIf(key -> !activeKeys.contains(key));
+            states.entrySet().removeIf(entry -> {
+                if (activeKeys.contains(entry.getKey())) return false;
+                releaseSubscriptions(level, entry.getValue());
+                return true;
+            });
             if (states.isEmpty()) {
-                STATE.remove(level);
+                onLevelClosed(level);
             }
             pruneDirty(level, dirty, gameTime);
         } catch (NoClassDefFoundError e) {
             unavailable = true;
             STATE.clear();
+            SUBSCRIPTIONS.clear();
             DIRTY.clear();
         } catch (RuntimeException | LinkageError e) {
             Logger.error("Disabling Voxy Sable parent chunk light sync after direct access failed", e);
             unavailable = true;
             STATE.clear();
+            SUBSCRIPTIONS.clear();
             DIRTY.clear();
         }
     }
@@ -206,8 +215,8 @@ public final class SableParentChunkLightSync {
         }
 
         // 发送记录仅覆盖当前足迹；离开存储环的完整区块不能在回访时误判为仍被客户端持有。
-        pruneSent(state.fullSent, minChunkX, maxChunkX, minChunkZ, maxChunkZ, trackingView, ringCenter, ringRadius, true);
-        pruneSent(state.lightSent, minChunkX, maxChunkX, minChunkZ, maxChunkZ, trackingView, ringCenter, ringRadius, false);
+        pruneSent(level, state, state.fullSent, minChunkX, maxChunkX, minChunkZ, maxChunkZ, trackingView, ringCenter, ringRadius, true);
+        pruneSent(level, state, state.lightSent, minChunkX, maxChunkX, minChunkZ, maxChunkZ, trackingView, ringCenter, ringRadius, false);
         state.pending.clear();
         for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
             for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
@@ -223,7 +232,8 @@ public final class SableParentChunkLightSync {
         state.trackingView = trackingView;
     }
 
-    private static void pruneSent(LongOpenHashSet sent, int minX, int maxX, int minZ, int maxZ,
+    private static void pruneSent(ServerLevel level, TrackingState state, LongOpenHashSet sent,
+                                  int minX, int maxX, int minZ, int maxZ,
                                   ChunkTrackingView view, ChunkPos center, int radius, boolean full) {
         LongIterator iterator = sent.iterator();
         while (iterator.hasNext()) {
@@ -232,6 +242,9 @@ public final class SableParentChunkLightSync {
             if (x < minX || x > maxX || z < minZ || z > maxZ || view.contains(x, z)
                     || (full && Math.max(Math.abs(x - center.x), Math.abs(z - center.z)) > radius)) {
                 iterator.remove();
+                if (!state.fullSent.contains(chunk) && !state.lightSent.contains(chunk)) {
+                    unsubscribe(level, chunk);
+                }
             }
         }
     }
@@ -241,27 +254,65 @@ public final class SableParentChunkLightSync {
                                      int x, int z) {
         long chunk = ChunkPos.asLong(x, z);
         if (view.contains(x, z)) {
-            state.fullSent.remove(chunk);
-            state.lightSent.remove(chunk);
+            removeSent(level, state, chunk);
             return true;
         }
         boolean inRing = Math.max(Math.abs(x - center.x), Math.abs(z - center.z)) <= radius;
         if (inRing && state.fullSent.contains(chunk)) return true;
         if (!inRing) {
-            state.fullSent.remove(chunk);
+            if (state.fullSent.contains(chunk)) removeSent(level, state, chunk);
             if (state.lightSent.contains(chunk)) return true;
         }
         LevelChunk loaded = level.getChunkSource().getChunkNow(x, z);
         if (loaded == null) return false;
         if (inRing) {
             player.connection.send(new ClientboundLevelChunkWithLightPacket(loaded, lightEngine, null, null));
+        } else {
+            player.connection.send(new ClientboundLightUpdatePacket(new ChunkPos(x, z), lightEngine, null, null));
+        }
+        recordSent(level, state, chunk, inRing);
+        return true;
+    }
+
+    private static void recordSent(ServerLevel level, TrackingState state, long chunk, boolean full) {
+        boolean alreadySent = state.fullSent.contains(chunk) || state.lightSent.contains(chunk);
+        if (full) {
             state.fullSent.add(chunk);
             state.lightSent.remove(chunk);
         } else {
-            player.connection.send(new ClientboundLightUpdatePacket(new ChunkPos(x, z), lightEngine, null, null));
             state.lightSent.add(chunk);
+            state.fullSent.remove(chunk);
         }
-        return true;
+        if (!alreadySent) {
+            SUBSCRIPTIONS.computeIfAbsent(level, ignored -> new Long2IntOpenHashMap()).addTo(chunk, 1);
+        }
+    }
+
+    private static void removeSent(ServerLevel level, TrackingState state, long chunk) {
+        boolean full = state.fullSent.remove(chunk);
+        boolean light = state.lightSent.remove(chunk);
+        if (full || light) unsubscribe(level, chunk);
+    }
+
+    private static void releaseSubscriptions(ServerLevel level, TrackingState state) {
+        LongIterator full = state.fullSent.iterator();
+        while (full.hasNext()) unsubscribe(level, full.nextLong());
+        LongIterator light = state.lightSent.iterator();
+        while (light.hasNext()) unsubscribe(level, light.nextLong());
+    }
+
+    private static void unsubscribe(ServerLevel level, long chunk) {
+        Long2IntOpenHashMap subscriptions = SUBSCRIPTIONS.get(level);
+        if (subscriptions == null) return;
+        int count = subscriptions.get(chunk);
+        if (count > 1) {
+            subscriptions.put(chunk, count - 1);
+            return;
+        }
+        subscriptions.remove(chunk);
+        if (subscriptions.isEmpty()) SUBSCRIPTIONS.remove(level);
+        Long2LongOpenHashMap dirty = DIRTY.get(level);
+        if (dirty != null) dirty.remove(chunk);
     }
 
     private static void refreshDirty(ServerLevel level, ServerPlayer player, TrackingState state,

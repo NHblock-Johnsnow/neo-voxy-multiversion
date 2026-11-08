@@ -506,6 +506,29 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
                                         .setImpact(OptionImpact.MEDIUM)
                                         .setEnablerInherit(s->sableInstalled),
                                 new BoolOption(
+                                        "voxy:sable_lod_force_loading",
+                                        Component.translatable("voxy.config.compat.sableLodForceLoading"),
+                                        ()->cfg.sableLodForceLoading, v->cfg.sableLodForceLoading=v)
+                                        .setImpact(OptionImpact.HIGH)
+                                        .setEnablerInherit(s->sableInstalled),
+                                new IntOption(
+                                        "voxy:sable_lod_load_distance",
+                                        Component.translatable("voxy.config.compat.sableLodLoadDistance"),
+                                        ()->cfg.sableLodLoadDistanceChunks, v->cfg.sableLodLoadDistanceChunks=v,
+                                        new Range(8, 192, 8))
+                                        .setFormatter(VoxyConfigMenu::formatCreateDistance)
+                                        .setImpact(OptionImpact.HIGH)
+                                        .setEnablerInherit(s->sableInstalled && s.readBooleanOption(
+                                                ResourceLocation.parse("voxy:sable_lod_force_loading")), "voxy:sable_lod_force_loading"),
+                                new IntOption(
+                                        "voxy:sable_lod_load_budget",
+                                        Component.translatable("voxy.config.compat.sableLodLoadBudget"),
+                                        ()->cfg.sableLodLoadBudget, v->cfg.sableLodLoadBudget=v,
+                                        new Range(1, 64, 1))
+                                        .setImpact(OptionImpact.HIGH)
+                                        .setEnablerInherit(s->sableInstalled && s.readBooleanOption(
+                                                ResourceLocation.parse("voxy:sable_lod_force_loading")), "voxy:sable_lod_force_loading"),
+                                new BoolOption(
                                         "voxy:distant_simulated_lasers",
                                         Component.translatable("voxy.config.compat.distantSimulatedLasers"),
                                         ()->cfg.distantSimulatedLasers, v->cfg.distantSimulatedLasers=v)

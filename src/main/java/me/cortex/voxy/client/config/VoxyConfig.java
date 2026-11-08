@@ -56,6 +56,9 @@ public class VoxyConfig {
     public boolean ingestEnabled = true;
     public float sectionRenderDistance = 16;
     public boolean sableLodRendering = true;
+    public boolean sableLodForceLoading = false;
+    public int sableLodLoadDistanceChunks = 32;
+    public int sableLodLoadBudget = 4;
     // 可选模组的总开关和距离上限；0 表示使用完整 LOD 半径。
     public int aeronauticsContraptionMaxChunks = 0;
     public boolean distantTrains = true;
@@ -259,6 +262,8 @@ public class VoxyConfig {
         this.setLeafLodMode(this.getLeafLodMode());
         this.farPlayerAnimationDistance = Math.clamp(this.farPlayerAnimationDistance, 0, 32768);
         this.aeronauticsContraptionMaxChunks = Math.clamp(this.aeronauticsContraptionMaxChunks, 0, 192);
+        this.sableLodLoadDistanceChunks = Math.clamp(this.sableLodLoadDistanceChunks, 8, 192);
+        this.sableLodLoadBudget = Math.clamp(this.sableLodLoadBudget, 1, 64);
         this.biomeBlendRadius = Math.clamp(this.biomeBlendRadius, 0, 7);
         if (!"water".equals(this.biomeBlendScope) && !"water_grass".equals(this.biomeBlendScope)) {
             this.biomeBlendScope = "water";
@@ -313,7 +318,10 @@ public class VoxyConfig {
         SableContraptionRenderDistance.updateClientConfig(
                 this.isRenderingEnabled() && this.sableLodRendering,
                 this.sectionRenderDistance,
-                this.aeronauticsContraptionMaxChunks
+                this.aeronauticsContraptionMaxChunks,
+                this.sableLodForceLoading,
+                this.sableLodLoadDistanceChunks,
+                this.sableLodLoadBudget
         );
     }
 

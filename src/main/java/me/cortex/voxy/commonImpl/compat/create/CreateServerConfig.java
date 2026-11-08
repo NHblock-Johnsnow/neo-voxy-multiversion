@@ -1,5 +1,6 @@
 package me.cortex.voxy.commonImpl.compat.create;
 
+import me.cortex.voxy.commonImpl.compat.sable.SableContraptionRenderDistance;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.config.ModConfig;
@@ -30,6 +31,22 @@ public final class CreateServerConfig {
                      "rate automatically. 5 = default (4 samples/second).")
             .defineInRange("sampleIntervalTicks", 5, 1, 40);
 
+    public static final ModConfigSpec.BooleanValue SABLE_LOD_FORCE_LOADING = BUILDER
+            .comment("Keep distant Sable structures loaded beyond normal chunk loading on dedicated servers.",
+                     "Disabled by default: Voxy only displays structures loaded by Sable or other mechanisms.",
+                     "Single-player uses the client Sable loading options instead.")
+            .define("sableLodForceLoading", false);
+
+    public static final ModConfigSpec.IntValue SABLE_LOD_LOAD_DISTANCE_CHUNKS = BUILDER
+            .comment("Sable active-loading radius in chunks; capped by the Sable tracking range.",
+                     "Does not reduce the display distance of structures already loaded elsewhere.")
+            .defineInRange("sableLodLoadDistanceChunks", 32, 8, 192);
+
+    public static final ModConfigSpec.IntValue SABLE_LOD_LOAD_BUDGET = BUILDER
+            .comment("Maximum new Voxy Sable region-ticket and holding-chunk load requests per tick per dimension.",
+                     "Limits new requests, not total loaded structures or their simulation cost.")
+            .defineInRange("sableLodLoadBudget", 4, 1, 64);
+
     public static final ModConfigSpec SPEC = BUILDER.build();
 
     public static void register(ModContainer container, IEventBus modEventBus) {
@@ -51,6 +68,10 @@ public final class CreateServerConfig {
     }
 
     private static void push() {
+        SableContraptionRenderDistance.updateServerConfig(
+                SABLE_LOD_FORCE_LOADING.get(),
+                SABLE_LOD_LOAD_DISTANCE_CHUNKS.get(),
+                SABLE_LOD_LOAD_BUDGET.get());
         DistantTrainConfig.updateServerConfig(
                 DISTANT_TRAINS_ENABLED.get(),
                 MAX_TRAIN_STREAM_CHUNKS.get() * 16.0,
