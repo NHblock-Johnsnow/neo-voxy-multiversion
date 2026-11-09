@@ -35,6 +35,7 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
 
     private final GlBuffer shaderUniforms;
     private final Matrix4f targetTransform = new Matrix4f();
+    private me.cortex.voxy.client.compat.sable.SableShaderDepthPublisher sableDepthPublisher;
 
     public IrisVoxyRenderPipeline(RenderProperties properties, IrisVoxyRenderPipelineData data, AsyncNodeManager nodeManager, NodeCleaner nodeCleaner, HierarchicalOcclusionTraverser traversal, BooleanSupplier frexSupplier) {
         super(properties, nodeManager, nodeCleaner, traversal, frexSupplier, data.shouldDeferTranslucency());
@@ -102,6 +103,7 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
 
     private void releaseResources(ExceptionCleanup cleanup) {
         if (this.data != null && this.data.thePipeline == this) this.data.thePipeline = null;
+        if (this.sableDepthPublisher != null) cleanup.run(this.sableDepthPublisher::free);
         if (this.depthBlit != null) cleanup.run(this.depthBlit::delete);
         if (this.shaderDepthHackFixTransformBlit != null) cleanup.run(this.shaderDepthHackFixTransformBlit::delete);
         if (this.shaderUniforms != null) cleanup.run(this.shaderUniforms::free);
@@ -231,6 +233,18 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
             return 0;
         }
         return this.fbTranslucent.getDepthTex().id;
+    }
+
+    public void publishSableShaderDepth(Viewport<?> viewport, int sourceDepth, int sourceWidth, int sourceHeight) {
+        if (this.fb.getDepthTex() == null || this.fbTranslucent.getDepthTex() == null
+                || this.fb.getDepthTex().getWidth() != viewport.width
+                || this.fb.getDepthTex().getHeight() != viewport.height) return;
+        if (this.sableDepthPublisher == null) {
+            this.sableDepthPublisher = new me.cortex.voxy.client.compat.sable.SableShaderDepthPublisher();
+        }
+        this.sableDepthPublisher.publish(
+                viewport, this.depthStencilSetup, sourceDepth, sourceWidth, sourceHeight,
+                this.fb.getDepthTex(), this.fbTranslucent.getDepthTex(), this.properties);
     }
 
     private static final int UNIFORM_BINDING_POINT = 7;

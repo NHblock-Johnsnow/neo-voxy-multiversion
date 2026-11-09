@@ -67,6 +67,21 @@ public class MixinIrisRenderingPipeline implements IGetVoxyPatchData, IGetIrisVo
         }
     }
 
+    @Inject(method = "beginTranslucents", at = @At(value = "INVOKE",
+            target = "Lnet/irisshaders/iris/targets/RenderTargets;copyPreTranslucentDepth()V", shift = At.Shift.AFTER))
+    private void voxy$publishSableShaderDepth(CallbackInfo ci) {
+        if (this.pipeline == null || this.pipeline.thePipeline == null
+                || !me.cortex.voxy.client.config.VoxyConfig.CONFIG.isRenderingEnabled()
+                || !me.cortex.voxy.client.config.VoxyConfig.CONFIG.sableLodRendering
+                || !me.cortex.voxy.client.compat.ShipBorne.anyShipPresent()) return;
+        var renderer = IGetVoxyRenderSystem.getNullable();
+        var viewport = renderer == null ? null : renderer.getViewport();
+        if (viewport == null || viewport.width <= 0 || viewport.height <= 0) return;
+        var targets = ((IrisRenderingPipelineAccessor) this).getRenderTargets();
+        this.pipeline.thePipeline.publishSableShaderDepth(viewport,
+                targets.getDepthTextureNoTranslucents().getTextureId(), targets.getCurrentWidth(), targets.getCurrentHeight());
+    }
+
     @Override
     public IrisShaderPatch voxy$getPatchData() {
         return this.patchData;

@@ -13,6 +13,8 @@ layout(location = 7) uniform float lodBoundaryFadeEnd;
 layout(location = 8) uniform ivec3 cameraBlockOrigin;
 layout(location = 9) uniform vec3 cameraFraction;
 layout(location = 10) uniform int boundaryGuardPass;
+layout(location = 11) uniform mat4 clipToSubLevel;
+layout(location = 15) uniform vec3 subLevelHalfExtent;
 
 #import <voxy:util/depthutils.glsl>
 
@@ -43,13 +45,30 @@ void main() {
     float sourceDepth = texture(depthTex, UV * scaleFactor).r;
     // Shader packs can leave sky depth very close to FAR without writing the
     // exact sentinel. Preserve the baseline tolerance to avoid masking sky.
-    if (abs(sourceDepth - FAR) < 1e-5) {
+    if (boundaryGuardPass == 2 ? sourceDepth == FAR : abs(sourceDepth - FAR) < 1e-5) {
         discard;
     }
 
-    vec4 cameraRelative = invSrcProjection
-            * vec4(UV * 2.0 - 1.0,
-                   sourceDepth * depthRemap.z + depthRemap.w, 1.0);
+    vec4 sourceClip = vec4(UV * 2.0 - 1.0,
+            sourceDepth * depthRemap.z + depthRemap.w, 1.0);
+    vec4 cameraRelative = invSrcProjection * sourceClip;
+
+    if (boundaryGuardPass == 2) {
+        // 只保留船体范围内已有的原版深度，不把空洞或后方地形误当成船体。
+        vec4 local = clipToSubLevel * sourceClip;
+        // 同时容纳 D24 量化和 float 矩阵点积误差；齐次比较避免远处除以极小 w。
+        vec4 error = abs(clipToSubLevel[2]) * (depthRemap.z / 16777215.0)
+                + (abs(clipToSubLevel[0] * sourceClip.x)
+                 + abs(clipToSubLevel[1] * sourceClip.y)
+                 + abs(clipToSubLevel[2] * sourceClip.z)
+                 + abs(clipToSubLevel[3])) * (4.0 * 1.1920929e-7);
+        if (any(greaterThan(abs(local.xyz),
+                subLevelHalfExtent * local.w + error.xyz + subLevelHalfExtent * error.w))) {
+            discard;
+        }
+        gl_FragDepth = projectDepth(cameraRelative.xyz / cameraRelative.w);
+        return;
+    }
     cameraRelative.xyz /= cameraRelative.w;
 
     float boundaryDistance = length(cameraRelative.xyz);

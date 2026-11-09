@@ -72,7 +72,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     private int consecutiveHolds;
     private long heldFrameCount, builtFrameCount;
 
-    private final FullscreenBlit depthStencilSetup;
+    protected final FullscreenBlit depthStencilSetup;
     private final FullscreenBlit sentinelRestore;
 
     public final DepthFramebuffer fb;
@@ -251,6 +251,11 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             this.depthStencilSetup.blit();
             glUniform1i(10, 0);
             glStencilMask(0xFF);
+        }
+
+        if (boundary.enabled() && me.cortex.voxy.client.compat.ShipBorne.anyShipPresent()) {
+            me.cortex.voxy.client.compat.sable.SableNativeDepthProtection.restore(
+                    viewport, this.depthStencilSetup, boundary.fadeStart());
         }
 
 
