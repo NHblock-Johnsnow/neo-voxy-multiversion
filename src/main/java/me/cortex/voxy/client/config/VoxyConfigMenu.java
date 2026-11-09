@@ -51,7 +51,6 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
                 generalPage(cfg, renderReload),
                 renderingPage(cfg, renderReload),
                 experimentalPage(cfg, renderReload),
-                fakesightPage(cfg),
                 compatibilityPage(cfg, renderReload, sableInstalled, createInstalled, powerGridInstalled,
                         copycatsInstalled, simulatedInstalled, framedBlocksInstalled, littleTilesInstalled,
                         domumInstalled, seasonsInstalled));
@@ -66,13 +65,7 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
                     }
                 }, "voxy:enabled")
                 .register("voxy:iris_reload", IrisUtil::reload)
-                .register("voxy:refresh_far_entities", FarEntityClient::sendHello)
-                .register("voxy:refresh_chunk_request", () -> {
-                    var minecraft = Minecraft.getInstance();
-                    if (minecraft.getConnection() != null) {
-                        minecraft.options.broadcastOptions();
-                    }
-                });
+                .register("voxy:refresh_far_entities", FarEntityClient::sendHello);
     }
 
     private static Page generalPage(VoxyConfig cfg, String renderReload) {
@@ -405,31 +398,6 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
                                         .setEnablerInherit(s->IrisUtil.irisShaderPackEnabled(), ConfigState.UPDATE_ON_REBUILD)
                                         .setPostChangeFlags(renderReload, "voxy:iris_reload")
                         )
-                ).setEnablerAND("voxy:enabled", "voxy:rendering");
-    }
-
-    private static Page fakesightPage(VoxyConfig cfg) {
-        return new Page(Component.translatable("voxy.config.fakesight"),
-                        new Group(Component.translatable("voxy.config.group.chunkRequests"),
-                                new BoolOption(
-                                        "voxy:fakesight_enabled",
-                                        Component.translatable("voxy.config.fakesight.enabled"),
-                                        ()->cfg.enableExtendedRequestDistance,
-                                        v->cfg.enableExtendedRequestDistance=v)
-                                        .setPostChangeFlags("voxy:refresh_chunk_request")
-                                        .setImpact(OptionImpact.HIGH),
-                                new IntOption(
-                                        "voxy:fakesight_request_distance",
-                                        Component.translatable("voxy.config.fakesight.distance"),
-                                        cfg::getRequestDistance, v->cfg.requestDistance=v,
-                                        new Range(VoxyConfig.MIN_REQUEST_DISTANCE,
-                                                VoxyConfig.MAX_REQUEST_DISTANCE, 1))
-                                        .setFormatter(v->Component.literal(Integer.toString(v)))
-                                        .setPostChangeFlags("voxy:refresh_chunk_request")
-                                        .setEnablerInherit("voxy:fakesight_enabled")
-                                        .setImpact(OptionImpact.HIGH)
-                        ).setEnablerInherit(s->Minecraft.getInstance().getConnection() == null
-                                || Minecraft.getInstance().hasSingleplayerServer(), ConfigState.UPDATE_ON_REBUILD)
                 ).setEnablerAND("voxy:enabled", "voxy:rendering");
     }
 

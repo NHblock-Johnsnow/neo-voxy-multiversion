@@ -34,8 +34,6 @@ public class VoxyConfig {
     }
 
     // 配置范围和渲染精度档位是设置界面的共享来源。
-    public static final int MIN_REQUEST_DISTANCE = 8;
-    public static final int MAX_REQUEST_DISTANCE = 48;
     public static final int MAX_CLOUD_DISTANCE = 128;
     public static final float MIN_SUBDIVISION_SIZE = 28.0f;
     public static final float MAX_SUBDIVISION_SIZE = 1024.0f;
@@ -105,8 +103,6 @@ public class VoxyConfig {
     public int lodBoundaryFadeLength = 16;
     public int lodBoundaryInset = 8;
     public int earthCurveRatio = 0;
-    public boolean enableExtendedRequestDistance = false;
-    public int requestDistance = 48;
     public String ssaoMode;
     public boolean useEnvironmentalFog = true;
     public String leafLodMode = "balanced";
@@ -125,11 +121,6 @@ public class VoxyConfig {
     public int sectionArrayPoolMiB = 100;
     public boolean experimentalOpaqueNearFirst = false;
     public boolean experimentalChunkMaskHalfRes = false;
-
-    /** 返回经过范围修正的扩展区块请求距离。 */
-    public int getRequestDistance() {
-        return Math.clamp(this.requestDistance, MIN_REQUEST_DISTANCE, MAX_REQUEST_DISTANCE);
-    }
 
     /** 将 LOD 半径转换为远景实体使用的方块距离。 */
     public int getFarEntityRenderDistanceBlocks() {
@@ -244,7 +235,6 @@ public class VoxyConfig {
         WorldSection.setArrayPoolCapMiB(this.sectionArrayPoolMiB);
         this.sectionRenderDistance = Math.clamp(this.sectionRenderDistance, 0.625f, 64.0f);
         this.setRenderQualityLevel(this.getRenderQualityLevel());
-        this.requestDistance = Math.clamp(this.requestDistance, MIN_REQUEST_DISTANCE, MAX_REQUEST_DISTANCE);
         // Older builds measured this percentage against one sixteenth of the LOD radius.
         if (this.fogDistancePercent > 200) {
             this.fogDistancePercent = Math.max(5, Math.round(this.fogDistancePercent / 16.0f));

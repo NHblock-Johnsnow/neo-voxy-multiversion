@@ -32,7 +32,6 @@ The experimental page includes stationary optimizations, GPU workload optimizati
 | Iris / Oculus | ✅ | ✅ | ✅ | Shader support |
 | Crossed ground-plant models | ✅ | ✅ | ✅ | Displays plants using lightweight crossed models |
 | Leaf LOD modes | ✅ | ✅ | ✅ | Provides Fast, Balanced, and Quality modes |
-| Extended chunk requests | ✅ | ✅ | ✅ | Requests farther chunks in single-player; disabled by default |
 | LOD biome water colours | ✅ | ✅ | ✅ | Handles water-colour transitions between biomes |
 | LOD build-pressure control | ✅ | ✅ | ✅ | Adjusts the priority of frame rate versus build speed |
 | World curvature | ✅ | ✅ | ✅ | Curves distant terrain in the GPU vertex stage |

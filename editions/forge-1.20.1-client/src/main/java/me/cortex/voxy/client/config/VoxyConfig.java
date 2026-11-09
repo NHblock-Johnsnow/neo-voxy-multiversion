@@ -30,8 +30,6 @@ public class VoxyConfig
         QUALITY
     }
 
-    public static final int MIN_REQUEST_DISTANCE = 8;
-    public static final int MAX_REQUEST_DISTANCE = 48;
     public static final float MIN_SUBDIVISION_SIZE = 28.0f;
     public static final float MAX_SUBDIVISION_SIZE = 1024.0f;
     public static final int DEFAULT_RENDER_QUALITY_LEVEL = 3;
@@ -62,8 +60,6 @@ public class VoxyConfig
     public int fogDistancePercent = 100;
     public int biomeBlendRadius = 2;
     public String biomeBlendScope = "water";
-    public boolean enableExtendedRequestDistance = false;
-    public int requestDistance = 48;
     public boolean showJoinMessage = true;
     public boolean upgradeCleanupNoticeShown = false;
     public boolean distantBeacons = true;
@@ -193,7 +189,6 @@ public class VoxyConfig
         this.fogDensity = clamp(this.fogDensity, 0.0f, 1.0f);
         this.fogDistancePercent = clamp(this.fogDistancePercent, 5, 200);
         this.biomeBlendRadius = clamp(this.biomeBlendRadius, 0, 7);
-        this.requestDistance = clamp(this.requestDistance, MIN_REQUEST_DISTANCE, MAX_REQUEST_DISTANCE);
         this.distantBeaconMaxChunks = clamp(this.distantBeaconMaxChunks, 0, 512);
         this.distantContraptionMaxChunks = clamp(this.distantContraptionMaxChunks, 0, 512);
         this.distantTrainMaxChunks = clamp(this.distantTrainMaxChunks, 0, 512);
@@ -203,10 +198,6 @@ public class VoxyConfig
             this.biomeBlendScope = "water";
         }
         this.setLeafLodMode(this.getLeafLodMode());
-    }
-
-    public int getRequestDistance() {
-        return clamp(this.requestDistance, MIN_REQUEST_DISTANCE, MAX_REQUEST_DISTANCE);
     }
 
     public int getLodRenderDistanceBlocks() {

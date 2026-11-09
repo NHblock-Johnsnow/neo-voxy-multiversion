@@ -39,11 +39,10 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
         SodiumConfigBuilder.buildToSodium(builder, options, config::save, VoxyConfigMenu::registerPostApplyOps,
                 generalPage(config, renderReload),
                 renderingPage(config, renderReload),
-                experimentalPage(config),
-                requestDistancePage(config));
+                experimentalPage(config));
     }
 
-    // 保存后的线程、光影和网络操作由 Sodium 按依赖关系调度。
+    // 保存后的线程和光影操作由 Sodium 按依赖关系调度。
     private static void registerPostApplyOps(PostApplyOps operations) {
         operations.register("voxy:update_threads", () -> {
                     var instance = VoxyCommon.getInstance();
@@ -51,13 +50,7 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
                         instance.updateDedicatedThreads();
                     }
                 }, "voxy:enabled")
-                .register("voxy:iris_reload", IrisUtil::reload)
-                .register("voxy:refresh_chunk_request", () -> {
-                    var minecraft = Minecraft.getInstance();
-                    if (minecraft.getConnection() != null) {
-                        minecraft.options.broadcastOptions();
-                    }
-                });
+                .register("voxy:iris_reload", IrisUtil::reload);
     }
 
     private static Page generalPage(VoxyConfig config, String renderReload) {
@@ -214,23 +207,6 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
                         .setImpact(OptionImpact.MEDIUM)
                         .setPostChangeFlags(renderReload))
                 .setEnablerInherit(state -> !IrisUtil.irisShadersEnabledInConfig(), ConfigState.UPDATE_ON_REBUILD);
-    }
-
-    private static Page requestDistancePage(VoxyConfig config) {
-        return new Page(Component.translatable("voxy.config.fakesight"),
-                new Group(Component.translatable("voxy.config.group.chunkRequests"),
-                        new BoolOption("voxy:fakesight_enabled", Component.translatable("voxy.config.fakesight.enabled"),
-                                () -> config.enableExtendedRequestDistance, value -> config.enableExtendedRequestDistance = value)
-                                .setImpact(OptionImpact.HIGH)
-                                .setPostChangeFlags("voxy:refresh_chunk_request"),
-                        new IntOption("voxy:fakesight_request_distance", Component.translatable("voxy.config.fakesight.distance"),
-                                config::getRequestDistance, value -> config.requestDistance = value, new Range(8, 48, 1))
-                                .setImpact(OptionImpact.HIGH)
-                                .setPostChangeFlags("voxy:refresh_chunk_request")
-                                .setEnablerInherit(state -> state.readBooleanOption(Identifier.parse("voxy:fakesight_enabled")), "voxy:fakesight_enabled"))
-                        .setEnablerInherit(state -> Minecraft.getInstance().getConnection() == null
-                                || Minecraft.getInstance().hasSingleplayerServer(), ConfigState.UPDATE_ON_REBUILD))
-                .setEnablerAND("voxy:enabled", "voxy:rendering");
     }
 
     private static Group biomeColoursGroup(VoxyConfig config, String renderReload) {

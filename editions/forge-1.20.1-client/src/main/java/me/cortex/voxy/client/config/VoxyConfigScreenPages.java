@@ -39,7 +39,6 @@ public abstract class VoxyConfigScreenPages {
         return List.of(
                 generalPage(storage),
                 renderingPage(storage),
-                requestDistancePage(storage),
                 compatibilityPage(storage));
     }
 
@@ -332,38 +331,6 @@ public abstract class VoxyConfigScreenPages {
                 .build());
 
         return page("voxy.config.rendering", groups);
-    }
-
-    private static OptionPage requestDistancePage(VoxyConfig storage) {
-        List<OptionGroup> groups = new ArrayList<>();
-        groups.add(OptionGroup.createBuilder()
-                .add(OptionImpl.createBuilder(boolean.class, storage)
-                        .setName(Component.translatable("voxy.config.fakesight.enabled"))
-                        .setTooltip(Component.translatable("voxy.config.fakesight.enabled.tooltip"))
-                        .setControl(TickBoxControl::new)
-                        .setBinding((s, value) -> {
-                            s.enableExtendedRequestDistance = value;
-                            if (Minecraft.getInstance().getConnection() != null) {
-                                Minecraft.getInstance().options.broadcastOptions();
-                            }
-                        }, s -> s.enableExtendedRequestDistance)
-                        .setImpact(OptionImpact.HIGH)
-                        .build())
-                .add(OptionImpl.createBuilder(int.class, storage)
-                        .setName(Component.translatable("voxy.config.fakesight.distance"))
-                        .setTooltip(Component.translatable("voxy.config.fakesight.distance.tooltip"))
-                        .setControl(option -> new SliderControl(option, VoxyConfig.MIN_REQUEST_DISTANCE, VoxyConfig.MAX_REQUEST_DISTANCE, 1,
-                                value -> Component.literal(Integer.toString(value))))
-                        .setBinding((s, value) -> {
-                            s.requestDistance = value;
-                            if (Minecraft.getInstance().getConnection() != null) {
-                                Minecraft.getInstance().options.broadcastOptions();
-                            }
-                        }, VoxyConfig::getRequestDistance)
-                        .setImpact(OptionImpact.HIGH)
-                        .build())
-                .build());
-        return page("voxy.config.fakesight", groups);
     }
 
     private static OptionPage compatibilityPage(VoxyConfig storage) {

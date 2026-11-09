@@ -69,15 +69,6 @@ public class VoxyNeoForgeConfig {
             .comment("Safety distance between the handoff outer edge and vanilla render distance, in blocks")
             .defineInRange("lodBoundaryInset", 8, 8, 32);
 
-    private static final ModConfigSpec.BooleanValue ENABLE_EXTENDED_REQUEST_DISTANCE = BUILDER
-            .comment("Enable FakeSight-style extended chunk requests for Voxy ingestion")
-            .define("enableExtendedRequestDistance", false);
-
-    private static final ModConfigSpec.IntValue REQUEST_DISTANCE = BUILDER
-            .comment("Requested chunk radius. Higher values increase world-generation load.")
-            .defineInRange("requestDistance", 48,
-                    VoxyConfig.MIN_REQUEST_DISTANCE, VoxyConfig.MAX_REQUEST_DISTANCE);
-
     // ---- 世界兼容与远景实体 -------------------------------------------
 
     private static final ModConfigSpec.IntValue EARTH_CURVE_RATIO = BUILDER
@@ -249,8 +240,6 @@ public class VoxyNeoForgeConfig {
         VoxyConfig.CONFIG.enableLodBoundaryFade = ENABLE_LOD_BOUNDARY_FADE.get();
         VoxyConfig.CONFIG.lodBoundaryFadeLength = LOD_BOUNDARY_FADE_LENGTH.get();
         VoxyConfig.CONFIG.lodBoundaryInset = LOD_BOUNDARY_INSET.get();
-        VoxyConfig.CONFIG.enableExtendedRequestDistance = ENABLE_EXTENDED_REQUEST_DISTANCE.get();
-        VoxyConfig.CONFIG.requestDistance = REQUEST_DISTANCE.get();
         VoxyConfig.CONFIG.earthCurveRatio = EARTH_CURVE_RATIO.get();
         VoxyConfig.CONFIG.sableLodRendering = SABLE_LOD_RENDERING.get();
         VoxyConfig.CONFIG.aeronauticsContraptionMaxChunks = SABLE_LOD_MAX_CHUNKS.get();
@@ -305,8 +294,6 @@ public class VoxyNeoForgeConfig {
         ENABLE_LOD_BOUNDARY_FADE.set(VoxyConfig.CONFIG.enableLodBoundaryFade);
         LOD_BOUNDARY_FADE_LENGTH.set(VoxyConfig.CONFIG.lodBoundaryFadeLength);
         LOD_BOUNDARY_INSET.set(VoxyConfig.CONFIG.lodBoundaryInset);
-        ENABLE_EXTENDED_REQUEST_DISTANCE.set(VoxyConfig.CONFIG.enableExtendedRequestDistance);
-        REQUEST_DISTANCE.set(VoxyConfig.CONFIG.requestDistance);
         EARTH_CURVE_RATIO.set(VoxyConfig.CONFIG.earthCurveRatio);
         SABLE_LOD_RENDERING.set(VoxyConfig.CONFIG.sableLodRendering);
         SABLE_LOD_MAX_CHUNKS.set(VoxyConfig.CONFIG.aeronauticsContraptionMaxChunks);

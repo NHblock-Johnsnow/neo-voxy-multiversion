@@ -1,7 +1,0 @@
-{
-  "required": false,
-  "package": "me.cortex.voxy.client.mixin.fakesight",
-  "compatibilityLevel": "JAVA_25",
-  "client": ["MixinChunkMap", "MixinIntegratedServer", "MixinOptions"],
-  "injectors": { "defaultRequire": 0 }
-}

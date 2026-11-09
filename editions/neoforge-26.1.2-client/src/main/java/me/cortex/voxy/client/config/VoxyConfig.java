@@ -57,8 +57,6 @@ public class VoxyConfig {
     public int earthCurveRatio;
     public int biomeBlendRadius = 2;
     public String biomeBlendScope = "water";
-    public boolean enableExtendedRequestDistance;
-    public int requestDistance = 48;
     public boolean showJoinMessage = true;
     public boolean upgradeCleanupNoticeShown;
     public boolean enableLodBoundaryFade = true;
@@ -180,15 +178,10 @@ public class VoxyConfig {
         this.lodBoundaryFadeLength = Math.clamp(this.lodBoundaryFadeLength, 8, 64);
         this.lodBoundaryInset = Math.clamp(this.lodBoundaryInset, 8, 32);
         this.biomeBlendRadius = Math.clamp(this.biomeBlendRadius, 0, 7);
-        this.requestDistance = Math.clamp(this.requestDistance, 8, 48);
         if (!"water".equals(this.biomeBlendScope) && !"water_grass".equals(this.biomeBlendScope)) {
             this.biomeBlendScope = "water";
         }
         this.setLeafLodMode(this.getLeafLodMode());
-    }
-
-    public int getRequestDistance() {
-        return Math.clamp(this.requestDistance, 8, 48);
     }
 
     private static Path getConfigPath() {
