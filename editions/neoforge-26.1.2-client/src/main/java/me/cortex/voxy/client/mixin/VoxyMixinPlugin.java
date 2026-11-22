@@ -2,14 +2,24 @@ package me.cortex.voxy.client.mixin;
 
 import java.util.List;
 import java.util.Set;
+import me.cortex.voxy.client.compat.seedgen.SeedGenBootstrap;
+import me.cortex.voxy.client.compat.seedgen.SeedGenCalls;
 import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.mixin.extensibility.IMixinConfigPlugin;
 import org.spongepowered.asm.mixin.extensibility.IMixinInfo;
 
 public final class VoxyMixinPlugin implements IMixinConfigPlugin {
+   private boolean seedGenCompatible;
    private boolean irisLoaded;
 
    public void onLoad(String mixinPackage) {
+      if (net.neoforged.fml.loading.FMLLoader.getCurrent().getDist().isClient()) {
+         var loadingMods = net.neoforged.fml.loading.LoadingModList.get();
+         var seedGenFile = loadingMods == null ? null : loadingMods.getModFileById(SeedGenBootstrap.MOD_ID);
+         seedGenCompatible = seedGenFile != null && seedGenFile.getMods().stream().anyMatch(mod ->
+                 SeedGenBootstrap.MOD_ID.equals(mod.getModId()) && SeedGenBootstrap.supports(mod.getVersion().toString()));
+         if (seedGenCompatible) SeedGenBootstrap.prepare(null);
+      }
       this.irisLoaded = isClassPresent("net.irisshaders.iris.Iris");
    }
 
@@ -30,12 +40,15 @@ public final class VoxyMixinPlugin implements IMixinConfigPlugin {
    }
 
    public List<String> getMixins() {
-      return null;
+      return seedGenCompatible ? List.of(SeedGenBootstrap.MIXIN) : null;
    }
 
    public void preApply(String targetClassName, ClassNode targetClass, String mixinClassName, IMixinInfo mixinInfo) {
    }
 
    public void postApply(String targetClassName, ClassNode targetClass, String mixinClassName, IMixinInfo mixinInfo) {
+      if (mixinClassName.startsWith("me.cortex.voxy.client.mixin.seedgen.")) {
+         SeedGenCalls.apply(targetClass, false);
+      }
    }
 }

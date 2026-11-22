@@ -9,6 +9,8 @@ plugins {
     id 'maven-publish'
 }
 
+sourceSets.main.java.srcDir('../../shared/seedgen/java')
+
 version = project.mod_version
 group = project.maven_group
 

@@ -1,7 +1,10 @@
 package me.cortex.voxy.common.world;
 
 import me.cortex.voxy.common.voxelization.VoxelizedSection;
+import me.cortex.voxy.common.voxelization.WorldVoxilizedSectionMipper;
 import me.cortex.voxy.common.world.other.Mapper;
+
+import java.util.Arrays;
 
 import static me.cortex.voxy.common.world.WorldEngine.*;
 
@@ -17,6 +20,28 @@ public class WorldUpdater {
             // 同一底层区段的写入与父层传播保持顺序，避免季节刷新被迟到的旧 mip 覆盖。
             synchronized (base) {
                 insertUpdateLocked(into, section, base);
+            }
+        } finally {
+            base.release();
+        }
+    }
+
+    /** 先核对覆盖，再为缺失区段生成 mip。 */
+    public static boolean insertUpdateIfMissing(WorldEngine world, VoxelizedSection input, boolean uniform, long uniformValue) {
+        if (!world.isLive()) return false;
+        var base = world.acquire(0, input.x >> 1, input.y >> 1, input.z >> 1);
+        try {
+            synchronized (base) {
+                // 保留旧缓存和已采集区段，包括已知空气。
+                int index = WorldSection.getIndex((input.x & 1) << 4, (input.y & 1) << 4, (input.z & 1) << 4);
+                if (base.legacySurfaceSource || base.surfaceData.isKnownVoxel(index)) return false;
+                if (uniform) {
+                    Arrays.fill(input.section, 16 * 16 * 16, input.section.length, uniformValue);
+                } else {
+                    WorldVoxilizedSectionMipper.mipSection(input, world.getMapper());
+                }
+                insertUpdateLocked(world, input, base);
+                return true;
             }
         } finally {
             base.release();

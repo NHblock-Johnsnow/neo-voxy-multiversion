@@ -71,6 +71,13 @@ public class VoxyClientInstance extends VoxyInstance {
 
    @Override
    public void shutdown() {
+      if (net.neoforged.fml.ModList.get().isLoaded("voxyseedgen")) {
+          try {
+              Class.forName("mobius.voxyseedgen.voxy.SeedFill").getMethod("stopForWorldClosing").invoke(null);
+          } catch (ReflectiveOperationException | LinkageError error) {
+              me.cortex.voxy.common.Logger.warn("Could not stop the external SeedGen job", error);
+          }
+      }
       super.shutdown();
       RenderResourceReuse.clearResources();
    }

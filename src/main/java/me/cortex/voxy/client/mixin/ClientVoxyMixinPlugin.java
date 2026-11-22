@@ -3,6 +3,8 @@ package me.cortex.voxy.client.mixin;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.fml.loading.FMLLoader;
 import net.neoforged.fml.loading.LoadingModList;
+import me.cortex.voxy.client.compat.seedgen.SeedGenBootstrap;
+import me.cortex.voxy.client.compat.seedgen.SeedGenCalls;
 import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.mixin.extensibility.IMixinConfigPlugin;
 import org.spongepowered.asm.mixin.extensibility.IMixinInfo;
@@ -13,6 +15,7 @@ import java.util.Set;
 
 /** 根据已加载模组选择客户端 Mixin，避免在专用服务端解析客户端类。 */
 public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
+    private boolean seedGenCompatible;
     private static boolean valkyrienSkiesInstalled;
     private static boolean nvidiumInstalled;
     private static boolean connectorInstalled;
@@ -33,6 +36,13 @@ public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
 
     @Override
     public void onLoad(String mixinPackage) {
+        if (FMLLoader.getDist() == Dist.CLIENT) {
+            var loadingMods = LoadingModList.get();
+            var seedGenFile = loadingMods == null ? null : loadingMods.getModFileById(SeedGenBootstrap.MOD_ID);
+            seedGenCompatible = seedGenFile != null && seedGenFile.getMods().stream().anyMatch(mod ->
+                    SeedGenBootstrap.MOD_ID.equals(mod.getModId()) && SeedGenBootstrap.supports(mod.getVersion().toString()));
+            if (seedGenCompatible) SeedGenBootstrap.prepare(null);
+        }
         valkyrienSkiesInstalled = isLoadedEarly("valkyrienskies");
         nvidiumInstalled = isLoadedEarly("nvidium");
         connectorInstalled = isLoadedEarly("connector");
@@ -66,6 +76,10 @@ public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
     @Override
     public List<String> getMixins() {
         List<String> mixins = new ArrayList<>();
+        if (seedGenCompatible) {
+            mixins.add(SeedGenBootstrap.MIXIN);
+            mixins.add("seedgen.SeedGenModernTargets");
+        }
         // client 配置只声明渲染目标；专用服务端必须返回空列表，避免提前加载客户端类。
         if (FMLLoader.getDist() != Dist.CLIENT) {
             return mixins;
@@ -151,5 +165,9 @@ public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
     public void preApply(String targetClassName, ClassNode targetClass, String mixinClassName, IMixinInfo mixinInfo) {}
 
     @Override
-    public void postApply(String targetClassName, ClassNode targetClass, String mixinClassName, IMixinInfo mixinInfo) {}
+    public void postApply(String targetClassName, ClassNode targetClass, String mixinClassName, IMixinInfo mixinInfo) {
+        if (mixinClassName.startsWith("me.cortex.voxy.client.mixin.seedgen.")) {
+            SeedGenCalls.apply(targetClass, true);
+        }
+    }
 }

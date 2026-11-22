@@ -143,6 +143,21 @@ public final class WorldSection {
         return d == null ? this.uniformValue : d[idx];
     }
 
+    /** 读取外部地形导入器的区块列，避免展开均匀区段。 */
+    public boolean hasNonAirInputColumn(int minX, int minZ) {
+        long[] values = this.data;
+        if (values == null) return !Mapper.isAir(this.uniformValue);
+        for (int y = 0; y < 32; y++) {
+            for (int z = minZ; z < minZ + 16; z++) {
+                int row = getIndex(minX, y, z);
+                for (int x = 0; x < 16; x++) {
+                    if (!Mapper.isAir(values[row + x])) return true;
+                }
+            }
+        }
+        return false;
+    }
+
     //Snapshot of the backing array, may be null when uniform. Callers must handle null.
     public long[] _rawOrNull() {
         return this.data;

@@ -3,6 +3,8 @@ plugins {
     id 'maven-publish'
 }
 
+sourceSets.main.java.srcDir('../../shared/seedgen/java')
+
 version = project.mod_version
 group = project.maven_group
 
@@ -284,4 +286,8 @@ publishing {
     publications {
         mavenJava(MavenPublication) { from components.java }
     }
+}
+
+tasks.named('jar') {
+    manifest.attributes('MixinConnector': 'me.cortex.voxy.client.compat.seedgen.ForgeSeedGenConnector')
 }
