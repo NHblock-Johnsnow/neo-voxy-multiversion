@@ -165,13 +165,9 @@ vec4 resolveFluidSideSize(BlockModel model, const in Quad rawQuad, uint face, ve
     if (face == 1u) {
         faceSize = vec4(-fluidEpsilon, 1.0 + fluidEpsilon, -fluidEpsilon, 1.0 + fluidEpsilon);
     } else if (face == 2u || face == 3u) {
-        float lowerHeight = float(extractFluidLowerHeight(rawQuad)) / 9.0;
-        float bottom = lowerHeight > 0.0 ? 1.0 - ((1.0 - lowerHeight) / lodScale) : 0.0;
-        faceSize = vec4(-fluidEpsilon, 1.0 + fluidEpsilon, bottom, max(top - bottom, fluidEpsilon));
+        faceSize = vec4(-fluidEpsilon, 1.0 + fluidEpsilon, 0.0, max(top, fluidEpsilon));
     } else if (face == 4u || face == 5u) {
-        float lowerHeight = float(extractFluidLowerHeight(rawQuad)) / 9.0;
-        float bottom = lowerHeight > 0.0 ? 1.0 - ((1.0 - lowerHeight) / lodScale) : 0.0;
-        faceSize = vec4(bottom, max(top - bottom, fluidEpsilon), -fluidEpsilon, 1.0 + fluidEpsilon);
+        faceSize = vec4(0.0, max(top, fluidEpsilon), -fluidEpsilon, 1.0 + fluidEpsilon);
     }
     return faceSize;
 }

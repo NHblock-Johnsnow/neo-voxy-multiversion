@@ -174,8 +174,8 @@ public class RenderDataFactory {
 
     private long encodeFluidStep(long quad, int lowerHeight, int voxelIndex) {
         if (lowerHeight <= 0) return quad;
+        // 位 42..45 会触发 quadHasFluidShape()，合并面仅清理该段并保留流体混色编码。
         quad &= ~((0xFL << 42) | (0x1FFL << 46) | (1L << 63));
-        quad |= ((long) lowerHeight) << 42;
         int paletteIndex = this.fluidBlendIds[voxelIndex];
         quad |= paletteIndex >= 0 ? (1L << 63) | ((long) paletteIndex << 46)
                 : ((long) this.biomeIds[voxelIndex] & 0x1FFL) << 46;
