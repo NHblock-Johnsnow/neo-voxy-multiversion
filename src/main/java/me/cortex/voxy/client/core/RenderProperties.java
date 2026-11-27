@@ -63,8 +63,9 @@ public record RenderProperties(boolean isZero2One, boolean isReverseZ, boolean u
     }
 
     public static RenderProperties getRenderProperties() {
+        // 按当前 OpenGL 裁剪深度模式确定投影深度区间，避免与窗口空间及光影管线失配。
         RenderProperties properties = new RenderProperties(
-                true,
+                !windowIsHalfNdc(),
                 false,
                 false);
 

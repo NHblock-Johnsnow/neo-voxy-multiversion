@@ -294,9 +294,10 @@ public class IrisVoxyRenderPipelineData {
     }
     private static int getUniformOrdering(UniformType type) {
         return switch (type) {
-            case MAT4, VEC4, VEC4I -> 0;
+            // mat3 在 std140 下占 12 个 float（已 4-slot 对齐），归入组 0 避免尾部误填标量。
+            case MAT3, MAT4, VEC4, VEC4I -> 0;
             case VEC2, VEC2I -> 1;
-            case VEC3, VEC3I, MAT3 -> 2;
+            case VEC3, VEC3I -> 2;
             case INT, FLOAT -> 3;
         };
     }

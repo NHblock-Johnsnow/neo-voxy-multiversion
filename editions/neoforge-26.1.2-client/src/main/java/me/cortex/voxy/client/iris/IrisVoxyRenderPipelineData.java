@@ -336,7 +336,8 @@ public class IrisVoxyRenderPipelineData {
    private static int getSizeAndAlignment(UniformType type) {
       return switch (type) {
          case INT, FLOAT -> P(1, 1);
-         case MAT3 -> P(11, 4);
+         // std140 中 mat3 按 3 个 vec4 列对齐，共 12 个 float；归入 4-slot 组以免尾部误填标量。
+         case MAT3 -> P(4 * 3, 4);
          case MAT4 -> P(16, 4);
          case VEC2, VEC2I -> P(2, 2);
          case VEC3, VEC3I -> P(3, 4);
@@ -348,8 +349,8 @@ public class IrisVoxyRenderPipelineData {
    private static int getUniformOrdering(UniformType type) {
       return switch (type) {
          case INT, FLOAT -> 3;
-         case MAT3, VEC3, VEC3I -> 2;
-         case MAT4, VEC4, VEC4I -> 0;
+         case VEC3, VEC3I -> 2;
+         case MAT3, MAT4, VEC4, VEC4I -> 0;
          case VEC2, VEC2I -> 1;
          default -> throw new MatchException(null, null);
       };
@@ -586,9 +587,8 @@ public class IrisVoxyRenderPipelineData {
                   IrisVoxyRenderPipelineData.TextureWSampler ts = samplers[j];
                   ARBDirectStateAccess.glBindTextureUnit(unit, ts.texture.getAsInt());
                   int sampler = ts.sampler.getAsInt();
-                  if (sampler != -1) {
-                     GL33C.glBindSampler(unit, sampler);
-                  }
+                  // 未指定自定义采样器时显式解绑，避免前序 pass 残留的采样器状态污染纹理参数。
+                  GL33C.glBindSampler(unit, sampler != -1 ? sampler : 0);
                }
             };
             return new IrisVoxyRenderPipelineData.ImageSet(builder.toString(), bindingFunction);

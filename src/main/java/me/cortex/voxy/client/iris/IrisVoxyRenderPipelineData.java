@@ -281,7 +281,8 @@ public class IrisVoxyRenderPipelineData {
     private static int getSizeAndAlignment(UniformType type) {
         return switch (type) {
             case INT, FLOAT -> P(1,1);//Size, Alignment
-            case MAT3 -> P(4+4+3,4);//is funky as each row is a vec3 padded to a vec4
+            // std140 中 mat3 按 3 个 vec4 列对齐，共 12 个 float；归入 4-slot 组以免尾部误填标量。
+            case MAT3 -> P(4*3,4);
             case MAT4 -> P(4*4,4);
             case VEC2, VEC2I -> P(2,2);
             case VEC3, VEC3I -> P(3,4);
@@ -290,9 +291,9 @@ public class IrisVoxyRenderPipelineData {
     }
     private static int getUniformOrdering(UniformType type) {
         return switch (type) {
-            case MAT4, VEC4, VEC4I -> 0;
+            case MAT3, MAT4, VEC4, VEC4I -> 0;
             case VEC2, VEC2I -> 1;
-            case VEC3, VEC3I, MAT3 -> 2;
+            case VEC3, VEC3I -> 2;
             case INT, FLOAT -> 3;
         };
     }
@@ -529,9 +530,8 @@ public class IrisVoxyRenderPipelineData {
                 var ts = samplers[j];
                 glBindTextureUnit(unit, ts.texture.getAsInt());
                 int sampler = ts.sampler;
-                if (sampler != -1) {
-                    glBindSampler(unit, sampler);
-                }
+                // 未指定自定义采样器时显式解绑，避免前序 pass 残留的采样器状态污染纹理参数。
+                glBindSampler(unit, sampler != -1 ? sampler : 0);
             }
         };
         return new ImageSet(builder.toString(), bindingFunction);
