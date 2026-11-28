@@ -382,7 +382,7 @@ public class VoxyRenderSystem {
     public void renderOpaque(Viewport<?> viewport) {
         // Iris also invokes Sodium terrain rendering for its shadow pass. It must never replace the
         // pending main-camera viewport or run the normal fallback into a shadow framebuffer.
-        if (IrisUtil.irisShadowActive()) {
+        if (IrisUtil.irisShadowActive() || me.cortex.voxy.client.core.util.RenderPassGuard.shouldSkipVoxyRender()) {
             return;
         }
         if (viewport == null) {
@@ -414,6 +414,9 @@ public class VoxyRenderSystem {
      * RGBA colour and Minecraft's shared world depth. Native Voxy-aware packs never enter this path.
      */
     public void renderUnpatchedIrisFallback() {
+        if (me.cortex.voxy.client.core.util.RenderPassGuard.isSecondaryPass()) {
+            return;
+        }
         Viewport<?> viewport = this.pendingUnpatchedIrisViewport;
         this.pendingUnpatchedIrisViewport = null;
         if (viewport == null || !(this.pipeline instanceof NormalRenderPipeline)) {

@@ -9,6 +9,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
 import me.cortex.voxy.client.core.rendering.Viewport;
 import me.cortex.voxy.client.core.util.IrisUtil;
+import me.cortex.voxy.client.core.util.RenderPassGuard;
 import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
 import net.caffeinemc.mods.sodium.client.render.chunk.ChunkRenderMatrices;
 import net.minecraft.client.Minecraft;
@@ -33,6 +34,9 @@ public class MixinSodiumWorldRendererVS {
     @Unique
     private void doRender(ChunkRenderMatrices matrices, RenderType renderLayer, double x, double y, double z) {
         if (renderLayer == RenderType.solid()) {
+            if (RenderPassGuard.shouldSkipVoxyRender()) {
+                return;
+            }
             var renderer = ((IGetVoxyRenderSystem) Minecraft.getInstance().levelRenderer).voxy$getRenderSystem();
             if (renderer != null) {
                 Viewport<?> viewport = null;

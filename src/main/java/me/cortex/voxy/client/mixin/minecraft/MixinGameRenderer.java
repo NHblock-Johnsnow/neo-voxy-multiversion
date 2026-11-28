@@ -19,6 +19,7 @@ public class MixinGameRenderer {
     @WrapMethod(method = "getDepthFar()F")
     public float getDepthFar(Operation<Float> original) {
         if (VoxyConfig.CONFIG.isRenderingEnabled()
+                && !me.cortex.voxy.client.core.util.RenderPassGuard.isSecondaryPass()
                 && !me.cortex.voxy.client.core.VoxyRenderSystem.visionEffectPresent()) {
             return Math.max(original.call(), VoxyConfig.CONFIG.sectionRenderDistance * 32F * 4F);
         }

@@ -4,6 +4,7 @@ import me.cortex.voxy.client.ICheekyClientChunkCache;
 import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
 import me.cortex.voxy.client.core.VoxyRenderSystem;
+import me.cortex.voxy.client.core.util.RenderPassGuard;
 import me.cortex.voxy.common.world.service.VoxelIngestService;
 import net.caffeinemc.mods.sodium.client.gl.device.CommandList;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
@@ -139,7 +140,9 @@ public class MixinRenderSectionManager {
     @Inject(method = "createTerrainRenderList", at = @At("HEAD"))
     private void voxy$resetVisibleSectionStream(Camera camera, Viewport viewport, int frame, boolean spectator,
                                                CallbackInfoReturnable<Boolean> cir) {
-        if (this.level.levelRenderer == null || me.cortex.voxy.client.core.util.IrisUtil.irisShadowActive()) {
+        boolean secondary = RenderPassGuard.isSecondaryPass() || RenderPassGuard.isSecondaryCamera(camera);
+        RenderPassGuard.setSecondarySectionList(secondary);
+        if (secondary || this.level.levelRenderer == null || me.cortex.voxy.client.core.util.IrisUtil.irisShadowActive()) {
             return;
         }
         var system = ((IGetVoxyRenderSystem)(this.level.levelRenderer)).voxy$getRenderSystem();

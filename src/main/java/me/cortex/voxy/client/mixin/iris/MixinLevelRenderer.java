@@ -2,6 +2,7 @@ package me.cortex.voxy.client.mixin.iris;
 
 import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
 import me.cortex.voxy.client.core.util.IrisUtil;
+import me.cortex.voxy.client.core.util.RenderPassGuard;
 import net.caffeinemc.mods.sodium.client.render.chunk.ChunkRenderMatrices;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
@@ -36,6 +37,11 @@ public class MixinLevelRenderer {
             Matrix4f positionMatrix,
             Matrix4f projectionMatrix,
             CallbackInfo ci) {
+        if (RenderPassGuard.isSecondaryPass()
+                || RenderPassGuard.isSecondaryCamera(camera)
+                || RenderPassGuard.isOffscreenFramebufferBound()) {
+            return;
+        }
         if (IrisUtil.irisShaderPackEnabled()) {
             var renderer = ((IGetVoxyRenderSystem) this).voxy$getRenderSystem();
             if (renderer != null) {

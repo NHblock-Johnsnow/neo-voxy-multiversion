@@ -2,6 +2,7 @@ package me.cortex.voxy.client.mixin.iris;
 
 import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
 import me.cortex.voxy.client.core.util.IrisUtil;
+import me.cortex.voxy.client.core.util.RenderPassGuard;
 import me.cortex.voxy.client.iris.IGetIrisVoxyPipelineData;
 import me.cortex.voxy.client.iris.IGetVoxyPatchData;
 import me.cortex.voxy.client.iris.IrisShaderPatch;
@@ -43,6 +44,9 @@ public class MixinIrisRenderingPipeline implements IGetVoxyPatchData, IGetIrisVo
 
     @Inject(method = "beginLevelRendering", at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/systems/RenderSystem;activeTexture(I)V", shift = At.Shift.BEFORE), remap = false)
     private void voxy$injectViewportSetup(CallbackInfo ci) {
+        if (RenderPassGuard.isSecondaryPass()) {
+            return;
+        }
         if (IrisUtil.CAPTURED_VIEWPORT_PARAMETERS != null) {
             var renderer = ((IGetVoxyRenderSystem) Minecraft.getInstance().levelRenderer).voxy$getRenderSystem();
             if (renderer != null) {
@@ -55,7 +59,7 @@ public class MixinIrisRenderingPipeline implements IGetVoxyPatchData, IGetIrisVo
 
     @Inject(method = "finalizeLevelRendering", at = @At("TAIL"))
     private void voxy$renderUnpatchedShaderFallback(CallbackInfo ci) {
-        if (this.patchData != null) {
+        if (this.patchData != null || RenderPassGuard.isSecondaryPass()) {
             return;
         }
         var levelRenderer = Minecraft.getInstance().levelRenderer;
@@ -70,7 +74,8 @@ public class MixinIrisRenderingPipeline implements IGetVoxyPatchData, IGetIrisVo
     @Inject(method = "beginTranslucents", at = @At(value = "INVOKE",
             target = "Lnet/irisshaders/iris/targets/RenderTargets;copyPreTranslucentDepth()V", shift = At.Shift.AFTER))
     private void voxy$publishSableShaderDepth(CallbackInfo ci) {
-        if (this.pipeline == null || this.pipeline.thePipeline == null
+        if (RenderPassGuard.isSecondaryPass()
+                || this.pipeline == null || this.pipeline.thePipeline == null
                 || !me.cortex.voxy.client.config.VoxyConfig.CONFIG.isRenderingEnabled()
                 || !me.cortex.voxy.client.config.VoxyConfig.CONFIG.sableLodRendering
                 || !me.cortex.voxy.client.compat.ShipBorne.anyShipPresent()) return;

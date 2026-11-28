@@ -4,6 +4,7 @@ import me.cortex.voxy.client.VoxyClient;
 import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
 import me.cortex.voxy.client.core.rendering.Viewport;
 import me.cortex.voxy.client.core.util.IrisUtil;
+import me.cortex.voxy.client.core.util.RenderPassGuard;
 import net.caffeinemc.mods.sodium.client.gl.device.CommandList;
 import net.caffeinemc.mods.sodium.client.gl.device.RenderDevice;
 import net.caffeinemc.mods.sodium.client.render.chunk.ChunkRenderMatrices;
@@ -46,6 +47,9 @@ public abstract class MixinDefaultChunkRenderer extends ShaderChunkRenderer {
     @Unique
     private void doRender(ChunkRenderMatrices matrices, TerrainRenderPass renderPass, CameraTransform camera) {
         if (renderPass == DefaultTerrainRenderPasses.CUTOUT) {
+            if (RenderPassGuard.shouldSkipVoxyRender()) {
+                return;
+            }
             var renderer = ((IGetVoxyRenderSystem) Minecraft.getInstance().levelRenderer).voxy$getRenderSystem();
             if (renderer != null) {
                 Viewport<?> viewport = null;
