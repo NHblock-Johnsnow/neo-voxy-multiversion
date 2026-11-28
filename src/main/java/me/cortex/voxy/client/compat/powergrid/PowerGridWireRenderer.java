@@ -232,6 +232,7 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
         double maxSq = max * max;
         pipeline.setupAndBindOpaque(viewport);
         boolean active = false;
+        boolean curved = false;
         int drawn = 0;
         var transform = new Matrix4f();
         try {
@@ -250,15 +251,16 @@ public final class PowerGridWireRenderer implements LodPipelineHooks.Renderer {
                 if (!active) {
                     DistantShaders.forPipeline(pipeline, false).bind();
                     DistantShaders.bindTextures();
+                    curved = DistantShaders.uploadWorldCurvature(viewport.MVP, viewport);
                     glEnable(GL_DEPTH_TEST); glDepthFunc(depthFunc); glDepthMask(true);
                     glDisable(GL_CULL_FACE);
                     glEnable(GL_STENCIL_TEST); glStencilFunc(GL_ALWAYS, 3, 0xFF);
                     glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
                     active = true;
                 }
-                transform.set(viewport.MVP).translate((float) (ox - viewport.cameraX),
-                        (float) (oy - viewport.cameraY), (float) (oz - viewport.cameraZ));
-                DistantShaders.uploadTransform(transform);
+                float wx = (float) (ox - viewport.cameraX), wy = (float) (oy - viewport.cameraY), wz = (float) (oz - viewport.cameraZ);
+                DistantShaders.uploadTranslation(transform, viewport.MVP, wx, wy, wz, curved);
+                if (curved) transform.set(viewport.MVP).translate(wx, wy, wz);
                 mesh.drawThin(viewport, transform, ox, oy, oz);
                 drawn++;
             }

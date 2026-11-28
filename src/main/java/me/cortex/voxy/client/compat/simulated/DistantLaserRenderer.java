@@ -221,6 +221,7 @@ public final class DistantLaserRenderer implements LodPipelineHooks.TranslucentR
         pipeline.setupAndBindTranslucent(viewport);
         var shader = DistantLaserShaders.forPipeline(pipeline);
         shader.bind();
+        boolean curved = DistantShaders.uploadWorldCurvature(viewport.MVP, viewport);
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(depthFunc);
         glDepthMask(true);
@@ -241,9 +242,17 @@ public final class DistantLaserRenderer implements LodPipelineHooks.TranslucentR
                         Math.max(source.x, ex) + w, Math.max(source.y, ey) + w, Math.max(source.z, ez) + w)) continue;
                 float length = entry.length;
                 if (length <= 0.001f) continue;
-                transform.set(viewport.MVP).translate((float) x, (float) y, (float) z)
+                transform.translation((float) x, (float) y, (float) z)
                         .rotate(entry.rotation).scale(source.halfWidth, source.halfWidth, length);
-                DistantShaders.uploadTransform(transform);
+                if (curved) {
+                    DistantShaders.uploadTransform(transform);
+                    transform.mulLocal(viewport.MVP);
+                } else {
+                    transform.mulLocal(viewport.MVP);
+                    DistantShaders.uploadTransform(transform);
+                }
+
+
                 DistantLaserShaders.uploadColor(shader, source.red, source.green, source.blue, source.alpha);
                 unitBeam.drawTranslucent(viewport, transform);
             }

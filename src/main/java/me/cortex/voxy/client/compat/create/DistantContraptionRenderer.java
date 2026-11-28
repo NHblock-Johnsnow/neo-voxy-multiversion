@@ -83,6 +83,7 @@ public final class DistantContraptionRenderer implements LodPipelineHooks.Render
         var entityCam = mc.gameRenderer.getMainCamera().getPosition();
 
         boolean renderStateActive = false;
+        boolean curved = false;
         int drawn = 0;
         long nowNanos = System.nanoTime();
         var transform = new Matrix4f();
@@ -114,6 +115,7 @@ public final class DistantContraptionRenderer implements LodPipelineHooks.Render
                 if (!renderStateActive) {
                     DistantShaders.forPipeline(pipeline, true).bind();
                     DistantShaders.bindTextures();
+                    curved = DistantShaders.uploadWorldCurvature(viewProjection, viewport);
                     glEnable(GL_DEPTH_TEST);
                     glDepthFunc(depthFunc);
                     glDepthMask(true);
@@ -125,8 +127,8 @@ public final class DistantContraptionRenderer implements LodPipelineHooks.Render
                 }
 
                 //VP · T(worldPos - camera) · M_local  (M_local = applyLocalTransforms, frozen)
-                transform.set(viewProjection).translate((float) dx, (float) dy, (float) dz).mul(snap.local());
-                DistantShaders.uploadTransform(transform);
+                DistantShaders.uploadModel(transform, viewProjection,
+                        transform.translation((float) dx, (float) dy, (float) dz).mul(snap.local()), curved);
                 int light = snap.lightPacked();
                 glUniform2f(4,
                         (DistantLightSampler.block(light) * 16 + 8) / 256.0f,

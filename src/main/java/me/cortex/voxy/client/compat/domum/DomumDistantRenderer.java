@@ -183,6 +183,7 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
         double maxDistance = VoxyConfig.CONFIG.createRenderDistance(VoxyConfig.CONFIG.distantDomumMaxChunks);
         double maxDistanceSq = maxDistance * maxDistance;
         boolean bound = false;
+        boolean curved = false;
         var transform = new Matrix4f();
         try {
             for (Entry entry : this.candidates) {
@@ -205,6 +206,7 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
                 if (!bound) {
                     DistantShaders.forPipeline(pipeline, false).bind();
                     DistantShaders.bindTextures();
+                    curved = DistantShaders.uploadWorldCurvature(viewport.MVP, viewport);
                     glEnable(GL_DEPTH_TEST);
                     glDepthFunc(depthFunc);
                     glDepthMask(true);
@@ -214,9 +216,9 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
                     glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
                     bound = true;
                 }
-                transform.set(viewport.MVP).translate((float) (ox - viewport.cameraX),
-                        (float) (oy - viewport.cameraY), (float) (oz - viewport.cameraZ));
-                DistantShaders.uploadTransform(transform);
+                DistantShaders.uploadTranslation(transform, viewport.MVP,
+                        (float) (ox - viewport.cameraX), (float) (oy - viewport.cameraY),
+                        (float) (oz - viewport.cameraZ), curved);
                 entry.mesh.drawAt(viewport, ox, oy, oz);
             }
             if (bound) {

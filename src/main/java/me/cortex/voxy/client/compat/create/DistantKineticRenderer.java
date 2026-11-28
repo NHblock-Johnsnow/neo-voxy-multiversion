@@ -84,6 +84,7 @@ public final class DistantKineticRenderer implements LodPipelineHooks.Renderer {
         double maxDistSq = maxDist * maxDist;
 
         boolean renderStateActive = false;
+        boolean curved = false;
         int drawn = 0;
         var transform = new Matrix4f();
         try {
@@ -111,6 +112,7 @@ public final class DistantKineticRenderer implements LodPipelineHooks.Renderer {
                     //Vertex-baked light (per BE), like the track meshes - no light uniform
                     DistantShaders.forPipeline(pipeline, false).bind();
                     DistantShaders.bindTextures();
+                    curved = DistantShaders.uploadWorldCurvature(viewProjection, viewport);
                     glEnable(GL_DEPTH_TEST);
                     glDepthFunc(depthFunc);
                     glDepthMask(true);
@@ -124,8 +126,8 @@ public final class DistantKineticRenderer implements LodPipelineHooks.Renderer {
                     renderStateActive = true;
                 }
 
-                transform.set(viewProjection).translate((float) (ox - camX), (float) (oy - camY), (float) (oz - camZ));
-                DistantShaders.uploadTransform(transform);
+                DistantShaders.uploadTranslation(transform, viewProjection,
+                        (float) (ox - camX), (float) (oy - camY), (float) (oz - camZ), curved);
                 mesh.drawAt(viewport, ox, oy, oz);
                 drawn++;
             }

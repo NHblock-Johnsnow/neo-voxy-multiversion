@@ -114,7 +114,7 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
         Vec3 cameraPos = new Vec3(camX, camY, camZ);
         boolean flywheelRendering = VisualizationManager.supportsVisualization(mc.level);
 
-        var drawState = new DrawState(pipeline, mc.level, depthFunc, nowMs);
+        var drawState = new DrawState(pipeline, mc.level, depthFunc, nowMs, viewProjection, viewport);
         int drawn = 0;
         var transform = new Matrix4f();
         var model = new Matrix4f();
@@ -175,8 +175,7 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
                     if (viewport == null || DistantVisibility.isTransformedBoxVisible(viewport, model,
                             camX, camY, camZ, cm.minX, cm.minY, cm.minZ, cm.maxX, cm.maxY, cm.maxZ)) {
                         drawState.prepare();
-                        transform.set(viewProjection).mul(model);
-                        DistantShaders.uploadTransform(transform);
+                        DistantShaders.uploadModel(transform, viewProjection, model, drawState.curved);
                         DistantShaders.uploadFaceRotation(-yaw + entry.initialYaw());
                         cm.drawModel(viewport, model, camX, camY, camZ);
                         recordDepthDraw(cm, model);
@@ -250,8 +249,7 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
                 continue;
             }
             drawState.prepare();
-            transform.set(viewProjection).mul(model);
-            DistantShaders.uploadTransform(transform);
+            DistantShaders.uploadModel(transform, viewProjection, model, drawState.curved);
             DistantShaders.uploadFaceRotation(yaw);
             mesh.drawModel(viewport, model, camX, camY, camZ);
             recordDepthDraw(mesh, model);
@@ -263,16 +261,22 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
         private final net.minecraft.client.multiplayer.ClientLevel level;
         private final int depthFunc;
         private final long nowMs;
+        private final org.joml.Matrix4fc viewProjection;
+        private final Viewport<?> viewport;
+        private boolean curved;
         private DistantTrainManager.CarriageTrack track;
         private double x, y, z;
         private boolean lightReady;
         private boolean active;
 
-        DrawState(AbstractRenderPipeline pipeline, net.minecraft.client.multiplayer.ClientLevel level, int depthFunc, long nowMs) {
+        DrawState(AbstractRenderPipeline pipeline, net.minecraft.client.multiplayer.ClientLevel level,
+                  int depthFunc, long nowMs, org.joml.Matrix4fc viewProjection, Viewport<?> viewport) {
             this.pipeline = pipeline;
             this.level = level;
             this.depthFunc = depthFunc;
             this.nowMs = nowMs;
+            this.viewProjection = viewProjection;
+            this.viewport = viewport;
         }
 
         void beginCarriage(DistantTrainManager.CarriageTrack track, double x, double y, double z) {
@@ -286,6 +290,7 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
             if (!this.active) {
                 DistantShaders.forPipeline(this.pipeline, true).bind();
                 DistantShaders.bindTextures();
+                this.curved = DistantShaders.uploadWorldCurvature(this.viewProjection, this.viewport);
                 glEnable(GL_DEPTH_TEST);
                 glDepthFunc(this.depthFunc);
                 glDepthMask(true);
@@ -355,15 +360,25 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
         DistantShaders.bindTextures();
 
         var sourceViewProjection = new Matrix4f(viewport.vanillaProjection).mul(viewport.modelView);
+        boolean curved = DistantShaders.uploadWorldCurvature(sourceViewProjection, viewport);
         var transform = new Matrix4f();
-        try (var stack = MemoryStack.stackPush()) {
-            var lodTransform = stack.mallocFloat(16);
+        if (curved) {
+            DistantShaders.uploadMatrixAt(8, viewport.MVP);
             for (int i = 0; i < depthDrawCount; i++) {
                 var draw = DEPTH_DRAWS.get(i);
-                transform.set(viewport.MVP).mul(draw.model).get(lodTransform);
-                glUniformMatrix4fv(8, false, lodTransform);
-                DistantShaders.uploadTransform(transform.set(sourceViewProjection).mul(draw.model));
+                DistantShaders.uploadTransform(draw.model);
                 draw.mesh.draw(draw.level, draw.blend);
+            }
+        } else {
+            try (var stack = MemoryStack.stackPush()) {
+                var lodTransform = stack.mallocFloat(16);
+                for (int i = 0; i < depthDrawCount; i++) {
+                    var draw = DEPTH_DRAWS.get(i);
+                    transform.set(viewport.MVP).mul(draw.model).get(lodTransform);
+                    glUniformMatrix4fv(8, false, lodTransform);
+                    DistantShaders.uploadTransform(transform.set(sourceViewProjection).mul(draw.model));
+                    draw.mesh.draw(draw.level, draw.blend);
+                }
             }
         }
         glBindVertexArray(0);

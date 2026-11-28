@@ -1,16 +1,20 @@
 package me.cortex.voxy.client.compat.create;
 
+import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.AbstractRenderPipeline;
 import me.cortex.voxy.client.core.gl.shader.Shader;
 import me.cortex.voxy.client.core.gl.shader.ShaderLoader;
 import me.cortex.voxy.client.core.gl.shader.ShaderType;
+import me.cortex.voxy.client.core.rendering.Viewport;
 import me.cortex.voxy.client.core.rendering.util.LightMapHelper;
 import me.cortex.voxy.common.Logger;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
 import org.lwjgl.system.MemoryStack;
 
+import static org.lwjgl.opengl.GL20C.glUniform3f;
 import static org.lwjgl.opengl.GL20C.nglUniformMatrix4fv;
 import static org.lwjgl.opengl.GL33C.glBindSampler;
 import static org.lwjgl.opengl.GL45C.glBindTextureUnit;
@@ -33,6 +37,8 @@ public final class DistantShaders {
     private static boolean patchFailed;
     private static AbstractRenderPipeline copycatOwner;
     private static Shader copycatOpaque, copycatTranslucent;
+
+    private static final Matrix4f CURVE_MODEL_SCRATCH = new Matrix4f();
 
     private DistantShaders() {}
 
@@ -218,12 +224,48 @@ public final class DistantShaders {
         LightMapHelper.bind(1);
     }
 
-    public static void uploadTransform(Matrix4f transform) {
+    public static void uploadTransform(Matrix4fc transform) {
+        uploadMatrixAt(0, transform);
+    }
+
+    public static void uploadMatrixAt(int location, Matrix4fc matrix) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             var buf = stack.mallocFloat(16);
-            transform.get(buf);
-            nglUniformMatrix4fv(0, 1, false, org.lwjgl.system.MemoryUtil.memAddress(buf));
+            matrix.get(buf);
+            nglUniformMatrix4fv(location, 1, false, org.lwjgl.system.MemoryUtil.memAddress(buf));
         }
+    }
+
+    /** 上传与地形 LOD 一致的世界曲率参数；未启用曲率时清零并返回 false。 */
+    public static boolean uploadWorldCurvature(Matrix4fc viewProjection, Viewport<?> viewport) {
+        int curveRatio = VoxyConfig.CONFIG.earthCurveRatio;
+        if (curveRatio < 50 || viewport == null) {
+            glUniform3f(20, 0.0f, 0.0f, 0.0f);
+            return false;
+        }
+        float radius = 6371000.0f / curveRatio;
+        float startDist = Math.max(Minecraft.getInstance().options.getEffectiveRenderDistance() * 16.0f - 16.0f, 16.0f);
+        glUniform3f(20, radius, startDist, (float) (viewport.cameraY - Math.floor(viewport.cameraY)));
+        uploadMatrixAt(16, viewProjection);
+        return true;
+    }
+
+    public static void uploadTranslation(Matrix4f transform, Matrix4fc viewProjection,
+                                         float dx, float dy, float dz, boolean curved) {
+        if (curved) {
+            uploadTransform(CURVE_MODEL_SCRATCH.translation(dx, dy, dz));
+            return;
+        }
+        uploadTransform(transform.set(viewProjection).translate(dx, dy, dz));
+    }
+
+    public static void uploadModel(Matrix4f transform, Matrix4fc viewProjection,
+                                   Matrix4fc model, boolean curved) {
+        if (curved) {
+            uploadTransform(model);
+            return;
+        }
+        uploadTransform(transform.set(viewProjection).mul(model));
     }
 
     //Nearest quarter turn of a model yaw (degrees, +Y right-handed) for the vertex shader's baked

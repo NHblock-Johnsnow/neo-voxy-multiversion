@@ -221,6 +221,7 @@ public final class CopycatDistantRenderer implements LodPipelineHooks.Renderer, 
         double maxDistance = VoxyConfig.CONFIG.createRenderDistance(VoxyConfig.CONFIG.distantCopycatsMaxChunks);
         double maxDistanceSq = maxDistance * maxDistance;
         boolean bound = false;
+        boolean curved = false;
         int previousSampler = org.lwjgl.opengl.GL30C.glGetIntegeri(org.lwjgl.opengl.GL33C.GL_SAMPLER_BINDING, 2);
         var transform = new Matrix4f();
         try {
@@ -244,6 +245,7 @@ public final class CopycatDistantRenderer implements LodPipelineHooks.Renderer, 
                 if (!bound) {
                     DistantShaders.forCopycatPipeline(pipeline, translucent).bind();
                     DistantShaders.bindTextures();
+                    curved = DistantShaders.uploadWorldCurvature(viewport.MVP, viewport);
                     bindTerrainDepth(pipeline, viewport);
                     glEnable(GL_DEPTH_TEST);
                     glDepthFunc(depthFunc);
@@ -261,11 +263,12 @@ public final class CopycatDistantRenderer implements LodPipelineHooks.Renderer, 
                     glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
                     bound = true;
                 }
-                transform.set(viewport.MVP).translate((float) (ox - viewport.cameraX),
-                        (float) (oy - viewport.cameraY), (float) (oz - viewport.cameraZ));
-                DistantShaders.uploadTransform(transform);
-                if (translucent) mesh.drawTranslucent(viewport, transform);
-                else mesh.drawAt(viewport, ox, oy, oz);
+                float rx = (float) (ox - viewport.cameraX), ry = (float) (oy - viewport.cameraY), rz = (float) (oz - viewport.cameraZ);
+                DistantShaders.uploadTranslation(transform, viewport.MVP, rx, ry, rz, curved);
+                if (translucent) {
+                    if (curved) transform.set(viewport.MVP).translate(rx, ry, rz);
+                    mesh.drawTranslucent(viewport, transform);
+                } else mesh.drawAt(viewport, ox, oy, oz);
             }
             if (bound) {
                 glBindVertexArray(0);

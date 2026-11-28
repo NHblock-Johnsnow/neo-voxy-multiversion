@@ -136,6 +136,7 @@ public final class DistantTrackRenderer implements LodPipelineHooks.Renderer {
 
         DistantShaders.forPipeline(pipeline, false).bind();
         DistantShaders.bindTextures();
+        boolean curved = DistantShaders.uploadWorldCurvature(viewProjection, viewport);
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(depthFunc);
         glDepthMask(true);
@@ -174,11 +175,8 @@ public final class DistantTrackRenderer implements LodPipelineHooks.Renderer {
                         unit.ox + m.maxX, unit.oy + m.maxY, unit.oz + m.maxZ)) {
                     continue;
                 }
-                transform.set(viewProjection).translate(
-                        (float) (unit.ox - camX),
-                        (float) (unit.oy - camY),
-                        (float) (unit.oz - camZ));
-                DistantShaders.uploadTransform(transform);
+                DistantShaders.uploadTranslation(transform, viewProjection,
+                        (float) (unit.ox - camX), (float) (unit.oy - camY), (float) (unit.oz - camZ), curved);
                 unit.mesh.drawAt(viewport, unit.ox, unit.oy, unit.oz);
                 drawn++;
             }

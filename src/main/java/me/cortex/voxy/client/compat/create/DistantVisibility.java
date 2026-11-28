@@ -1,6 +1,8 @@
 package me.cortex.voxy.client.compat.create;
 
+import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.rendering.Viewport;
+import net.minecraft.client.Minecraft;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
 
@@ -16,7 +18,7 @@ public final class DistantVisibility {
         float x1 = (float) (maxX - viewport.cameraX);
         float y1 = (float) (maxY - viewport.cameraY);
         float z1 = (float) (maxZ - viewport.cameraZ);
-        return viewport.frustum.testAab(x0, y0, z0, x1, y1, z1);
+        return testBox(viewport, x0, y0, z0, x1, y1, z1);
     }
 
     public static boolean isTransformedBoxVisible(Viewport<?> viewport, Matrix4f local,
@@ -40,8 +42,29 @@ public final class DistantVisibility {
         double rx = Math.abs(local.m00()) * hx + Math.abs(local.m10()) * hy + Math.abs(local.m20()) * hz;
         double ry = Math.abs(local.m01()) * hx + Math.abs(local.m11()) * hy + Math.abs(local.m21()) * hz;
         double rz = Math.abs(local.m02()) * hx + Math.abs(local.m12()) * hy + Math.abs(local.m22()) * hz;
-        return viewport.frustum.testAab(
+        return testBox(viewport,
                 Math.nextDown((float) (x - rx)), Math.nextDown((float) (y - ry)), Math.nextDown((float) (z - rz)),
                 Math.nextUp((float) (x + rx)), Math.nextUp((float) (y + ry)), Math.nextUp((float) (z + rz)));
+    }
+
+    private static boolean testBox(Viewport<?> viewport,
+                                   float x0, float y0, float z0,
+                                   float x1, float y1, float z1) {
+        int curveRatio = VoxyConfig.CONFIG.earthCurveRatio;
+        if (curveRatio < 50) {
+            return viewport.frustum.testAab(x0, y0, z0, x1, y1, z1);
+        }
+        // 世界曲率会使远景向下弯曲并轻微向相机内收，按最远水平角点保守扩展底部包围盒避免误剔除。
+        float maxX = Math.max(Math.abs(x0), Math.abs(x1));
+        float maxZ = Math.max(Math.abs(z0), Math.abs(z1));
+        float dist = (float) Math.hypot(maxX, maxZ);
+        float startDist = Math.max(Minecraft.getInstance().options.getEffectiveRenderDistance() * 16.0f - 16.0f, 16.0f);
+        float curvedDist = dist - startDist;
+        if (curvedDist > 0.0f) {
+            float localRadius = Math.max(6371000.0f / curveRatio + y0, 1.0f);
+            float angle = curvedDist / localRadius;
+            y0 += (float) ((Math.cos(angle) - 1.0) * localRadius);
+        }
+        return viewport.frustum.testAab(x0, y0, z0, x1, y1, z1);
     }
 }

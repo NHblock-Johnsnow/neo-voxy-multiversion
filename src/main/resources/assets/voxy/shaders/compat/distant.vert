@@ -15,6 +15,9 @@ layout(location = 6) in uint aCustomId;
 //Full transform: (pipeline MVP or vanilla proj*view) * model
 layout(location = 0) uniform mat4 uTransform;
 layout(location = 6) uniform vec3 uMeshLod;
+// 开启世界曲率时，uTransform 仅传相机相对模型矩阵，再按地形同款曲率弯曲后由 uViewProj 投影。
+layout(location = 16) uniform mat4 uViewProj;
+layout(location = 20) uniform vec3 uWorldCurve;
 #ifdef UNIFORM_LIGHT
 //Moving meshes bake without light; one light level per draw
 layout(location = 4) uniform vec2 uLightUv;
@@ -41,6 +44,18 @@ layout(location = 6) out vec4 fLodClip;
 vec2 distantTaaShift();
 #endif
 
+vec3 applyWorldCurvature(vec3 relPos) {
+    float radius = uWorldCurve.x;
+    float distanceFromCamera = length(relPos.xz);
+    float curvedDistance = distanceFromCamera - uWorldCurve.y;
+    if (radius <= 0.0 || curvedDistance <= 0.0) return relPos;
+    float localRadius = max(radius + relPos.y + uWorldCurve.z, 1.0);
+    float angle = curvedDistance / localRadius;
+    relPos.y += (cos(angle) - 1.0) * localRadius;
+    relPos.xz *= (uWorldCurve.y + sin(angle) * localRadius) / distanceFromCamera;
+    return relPos;
+}
+
 void main() {
     vec3 position = aPos;
     if (uMeshLod.x > 0.0) position = floor(aPos / uMeshLod.x) * uMeshLod.x;
@@ -48,14 +63,23 @@ void main() {
         vec3 coarse = floor(aPos / uMeshLod.y) * uMeshLod.y;
         position = mix(position, coarse, uMeshLod.z);
     }
-    gl_Position = uTransform * vec4(position, 1.0);
+    if (uWorldCurve.x > 0.0) {
+        vec3 curved = applyWorldCurvature((uTransform * vec4(position, 1.0)).xyz);
+        gl_Position = uViewProj * vec4(curved, 1.0);
+        #ifdef TRAIN_DEPTH_REPLAY
+        fLodClip = uLodTransform * vec4(curved, 1.0);
+        fLodClip.xy += distantTaaShift() * fLodClip.w;
+        #endif
+    } else {
+        gl_Position = uTransform * vec4(position, 1.0);
+        #ifdef TRAIN_DEPTH_REPLAY
+        // 回写沿用原版投影，LOD 遮挡采样则匹配光影抖动。
+        fLodClip = uLodTransform * vec4(position, 1.0);
+        fLodClip.xy += distantTaaShift() * fLodClip.w;
+        #endif
+    }
     #ifdef PATCHED_SHADER
     gl_Position.xy += distantTaaShift() * gl_Position.w;
-    #endif
-    #ifdef TRAIN_DEPTH_REPLAY
-    // 回写沿用原版投影，LOD 遮挡采样则匹配光影抖动。
-    fLodClip = uLodTransform * vec4(position, 1.0);
-    fLodClip.xy += distantTaaShift() * fLodClip.w;
     #endif
     fUv = aUv;
     fColor = aColor;
